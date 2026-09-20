@@ -1,0 +1,873 @@
+//@version=6
+indicator(
+    title = "ACW ∞ Spectral Fusion PRO 1d3",
+    shorttitle = "ACW ∞ 1d3",
+    overlay = true,
+    precision = 2,
+    max_lines_count = 500,
+    max_labels_count = 100,
+    max_bars_back = 5000)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACW ∞ SPECTRAL FUSION PRO 1d3
+//
+// Parser-safe mobile edition + stronger default visuals per user feedback.
+// Architecture:
+//   1. Adaptive MAMA/FAMA engine
+//   2. MACD 10-vote momentum council
+//   3. HH/HL/LH/LL structural swing engine
+//   4. Fusion score -100 ... +100
+//   5. Confidence + market regime classifier
+//   6. Spectral visualization / glow / adaptive heat
+//   7. Fusion dashboard + alerts
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  0. MASTER / THEME                                                    ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MASTER = "00 • ACW ∞ Master"
+
+string theme = input.string(
+    "Aurora Neon",
+    "Visual Theme",
+    options = ["Aurora Neon", "Ocean Deep", "Royal Gold", "Crimson Ice"],
+    group = GRP_MASTER)
+
+bool autoProfile = input.bool(
+    true,
+    "Automatic timeframe profile",
+    group = GRP_MASTER,
+    tooltip = "Automatically selects MACD and swing responsiveness for the current chart timeframe.")
+
+bool autoAdapt = input.bool(
+    true,
+    "Adaptive MAMA intelligence",
+    group = GRP_MASTER,
+    tooltip = "Blends efficiency ratio and volatility rank into MAMA/FAMA responsiveness.")
+
+bool showDashboard = input.bool(true, "Fusion Dashboard", group = GRP_MASTER)
+bool showSignals = input.bool(true, "Fusion impulse signals", group = GRP_MASTER)
+bool confirmedOnly = input.bool(true, "Signals on confirmed bars only", group = GRP_MASTER)
+
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_sign(float x) =>
+    x > 0.0 ? 1 : x < 0.0 ? -1 : 0
+
+f_vote(bool condition) =>
+    condition ? 1 : -1
+
+color bullBase = switch theme
+    "Aurora Neon" => #00E5FF
+    "Ocean Deep"  => #00B8D4
+    "Royal Gold"  => #FFD740
+    => #64FFDA
+
+color bullHot = switch theme
+    "Aurora Neon" => #00FFB8
+    "Ocean Deep"  => #00E5FF
+    "Royal Gold"  => #FFAB00
+    => #00E676
+
+color bearBase = switch theme
+    "Aurora Neon" => #FF3D71
+    "Ocean Deep"  => #7C4DFF
+    "Royal Gold"  => #FF5252
+    => #FF1744
+
+color bearHot = switch theme
+    "Aurora Neon" => #FF1744
+    "Ocean Deep"  => #D500F9
+    "Royal Gold"  => #D50000
+    => #FF4081
+
+color neutralBase = theme == "Royal Gold" ? #8D7B57 : #546E7A
+color darkBase = theme == "Ocean Deep" ? #07141E : theme == "Royal Gold" ? #17130B : #0B1118
+
+f_scoreColor(float score, int transparency) =>
+    color result = color.new(neutralBase, transparency)
+    if score >= 0.0
+        result := color.from_gradient(
+            score,
+            0.0,
+            100.0,
+            color.new(neutralBase, transparency),
+            color.new(bullHot, transparency))
+    else
+        result := color.from_gradient(
+            score,
+            -100.0,
+            0.0,
+            color.new(bearHot, transparency),
+            color.new(neutralBase, transparency))
+    result
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  1. ADAPTIVE CONTEXT ENGINE                                           ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_ADAPT = "01 • Adaptive Intelligence"
+
+int erLength = input.int(20, "Efficiency Ratio Length", minval = 5, maxval = 100, group = GRP_ADAPT)
+int volLookback = input.int(100, "Volatility Rank Lookback", minval = 20, maxval = 500, group = GRP_ADAPT)
+int atrLength = input.int(14, "ATR Length", minval = 2, group = GRP_ADAPT)
+
+float atr = ta.atr(atrLength)
+float safePrice = math.max(math.abs(close), syminfo.mintick)
+float volNorm = atr / safePrice * 100.0
+float volRankRaw = ta.percentrank(volNorm, volLookback)
+float volRank = nz(volRankRaw, 50.0)
+
+float priceStep = math.abs(ta.change(close))
+float erDen = ta.sma(priceStep, erLength) * erLength
+float efficiency = not na(erDen) and erDen > 0.0 ? f_clamp(math.abs(close - close[erLength]) / erDen, 0.0, 1.0) : 0.0
+float adaptiveDrive = f_clamp(0.58 * efficiency + 0.42 * (volRank / 100.0), 0.0, 1.0)
+
+bool intraday = timeframe.isintraday
+int tfMult = timeframe.multiplier
+
+string profileName = "SWING"
+if not autoProfile
+    profileName := "MANUAL"
+else if not intraday
+    profileName := "HTF"
+else if tfMult <= 1
+    profileName := "SCALP 1m"
+else if tfMult <= 5
+    profileName := "SCALP 3–5m"
+else if tfMult <= 15
+    profileName := "INTRADAY"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  2. MAMA / FAMA — ADAPTIVE EHLERS ENGINE                              ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MAMA = "02 • MAMA / FAMA"
+
+float mamaSrc = input.source(close, "Source", group = GRP_MAMA)
+float fastLimitInput = input.float(0.20, "Fast Limit", minval = 0.01, maxval = 0.90, step = 0.01, group = GRP_MAMA)
+float slowLimitInput = input.float(0.05, "Slow Limit", minval = 0.005, maxval = 0.50, step = 0.005, group = GRP_MAMA)
+bool showMama = input.bool(true, "Show MAMA / FAMA", group = GRP_MAMA)
+bool mamaGlow = input.bool(true, "Spectral glow", group = GRP_MAMA)
+bool fillMama = input.bool(true, "Energy fill", group = GRP_MAMA)
+int mamaWidth = input.int(2, "Core width", minval = 1, maxval = 4, group = GRP_MAMA)
+bool markMamaCross = input.bool(false, "Mark MAMA/FAMA crosses", group = GRP_MAMA)
+
+float tfResponse = 0.88
+if not autoProfile
+    tfResponse := 1.0
+else if not intraday
+    tfResponse := 0.82
+else if tfMult <= 1
+    tfResponse := 1.15
+else if tfMult <= 5
+    tfResponse := 1.06
+else if tfMult <= 15
+    tfResponse := 0.96
+
+float fastBase = math.max(fastLimitInput, slowLimitInput)
+float slowBase = math.min(slowLimitInput, fastBase)
+float fastLimit = autoAdapt ? f_clamp(fastBase * tfResponse * (0.84 + 0.34 * adaptiveDrive), 0.02, 0.60) : fastBase
+float slowLimit = autoAdapt ? f_clamp(slowBase * (0.88 + 0.24 * adaptiveDrive), 0.005, fastLimit * 0.80) : slowBase
+
+float p = 0.0
+float i2 = 0.0
+float q2 = 0.0
+float re = 0.0
+float im = 0.0
+float spp = 0.0
+float mama = 0.0
+float fama = 0.0
+
+float sp = (4.0 * mamaSrc + 3.0 * mamaSrc[1] + 2.0 * mamaSrc[2] + mamaSrc[3]) / 10.0
+float dt = (0.0962 * sp + 0.5769 * nz(sp[2]) - 0.5769 * nz(sp[4]) - 0.0962 * nz(sp[6])) * (0.075 * nz(p[1]) + 0.54)
+float q1 = (0.0962 * dt + 0.5769 * nz(dt[2]) - 0.5769 * nz(dt[4]) - 0.0962 * nz(dt[6])) * (0.075 * nz(p[1]) + 0.54)
+float i1 = nz(dt[3])
+float jI = (0.0962 * i1 + 0.5769 * nz(i1[2]) - 0.5769 * nz(i1[4]) - 0.0962 * nz(i1[6])) * (0.075 * nz(p[1]) + 0.54)
+float jq = (0.0962 * q1 + 0.5769 * nz(q1[2]) - 0.5769 * nz(q1[4]) - 0.0962 * nz(q1[6])) * (0.075 * nz(p[1]) + 0.54)
+float i2Raw = i1 - jq
+float q2Raw = q1 + jI
+
+i2 := 0.20 * i2Raw + 0.80 * nz(i2[1])
+q2 := 0.20 * q2Raw + 0.80 * nz(q2[1])
+
+float reRaw = i2 * nz(i2[1]) + q2 * nz(q2[1])
+float imRaw = i2 * nz(q2[1]) - q2 * nz(i2[1])
+re := 0.20 * reRaw + 0.80 * nz(re[1])
+im := 0.20 * imRaw + 0.80 * nz(im[1])
+
+float p1 = im != 0.0 and re != 0.0 ? 2.0 * math.pi / math.atan(im / re) : nz(p[1], 10.0)
+float previousP1 = nz(p1[1], p1)
+float p2 = p1 > 1.50 * previousP1 ? 1.50 * previousP1 : p1 < 0.67 * previousP1 ? 0.67 * previousP1 : p1
+float p3 = p2 < 6.0 ? 6.0 : p2 > 50.0 ? 50.0 : p2
+p := 0.20 * p3 + 0.80 * nz(p3[1], p3)
+spp := 0.33 * p + 0.67 * nz(spp[1], p)
+
+float phase = i1 != 0.0 ? 180.0 / math.pi * math.atan(q1 / i1) : 0.0
+float dPhaseRaw = nz(phase[1], phase) - phase
+float dPhase = math.max(dPhaseRaw, 1.0)
+float alphaRaw = fastLimit / dPhase
+float alpha = f_clamp(alphaRaw, slowLimit, fastLimit)
+
+mama := alpha * mamaSrc + (1.0 - alpha) * nz(mama[1], mamaSrc)
+fama := 0.50 * alpha * mama + (1.0 - 0.50 * alpha) * nz(fama[1], mama)
+
+float safeAtr = math.max(atr, syminfo.mintick)
+float mamaSpreadScore = f_clamp((mama - fama) / (safeAtr * 0.35) * 100.0, -100.0, 100.0)
+float mamaSlopeScore = f_clamp((mama - nz(mama[1], mama)) / (safeAtr * 0.08) * 100.0, -100.0, 100.0)
+float mamaScore = f_clamp(0.76 * mamaSpreadScore + 0.24 * mamaSlopeScore, -100.0, 100.0)
+color mamaColor = f_scoreColor(mamaScore, 0)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  3. MACD MOMENTUM COUNCIL                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MACD = "03 • MACD Momentum Council"
+
+float macdSrc = input.source(close, "Price data", group = GRP_MACD)
+int manualFast = input.int(12, "Manual Fast EMA", minval = 1, group = GRP_MACD)
+int manualSlow = input.int(26, "Manual Slow EMA", minval = 2, group = GRP_MACD)
+int manualSignal = input.int(9, "Manual Signal", minval = 1, group = GRP_MACD)
+bool showMacdMA = input.bool(true, "Show MACD EMA structure", group = GRP_MACD)
+bool emaGlow = input.bool(true, "EMA glow", group = GRP_MACD)
+bool showHeat = input.bool(true, "Spectral background heat", group = GRP_MACD)
+string heatSource = input.string("ACW + TDI Confluence", "Heat Source", options = ["ACW Fusion", "MACD Council", "TDI Fusion", "ACW + TDI Confluence"], group = GRP_MACD)
+int heatTransparency = input.int(84, "Base heat transparency", minval = 70, maxval = 96, group = GRP_MACD)
+float minHeatStrength = input.float(0.58, "Minimum visible heat strength", minval = 0.20, maxval = 1.0, step = 0.05, group = GRP_MACD)
+
+int macdFast = 16
+int macdSlow = 34
+int macdSig = 9
+
+if not autoProfile
+    macdFast := manualFast
+    macdSlow := manualSlow
+    macdSig := manualSignal
+else if intraday
+    if tfMult <= 1
+        macdFast := 8
+        macdSlow := 21
+        macdSig := 5
+    else if tfMult <= 5
+        macdFast := 10
+        macdSlow := 24
+        macdSig := 7
+    else if tfMult <= 15
+        macdFast := 12
+        macdSlow := 26
+        macdSig := 9
+
+float fastMA = ta.ema(macdSrc, macdFast)
+float slowMA = ta.ema(macdSrc, macdSlow)
+float macdLine = fastMA - slowMA
+float macdSignal = ta.ema(macdLine, macdSig)
+float macdHist = macdLine - macdSignal
+
+int vote1 = f_vote(fastMA > slowMA)
+int vote2 = f_vote(ta.change(fastMA) > 0.0)
+int vote3 = f_vote(ta.change(slowMA) > 0.0)
+int vote4 = f_vote(macdLine > 0.0)
+int vote5 = f_vote(ta.change(macdLine) > 0.0)
+int vote6 = f_vote(macdLine > macdSignal)
+int vote7 = f_vote(macdHist > 0.0)
+int vote8 = f_vote(ta.change(macdHist) > 0.0)
+int vote9 = f_vote(macdSignal > 0.0)
+int vote10 = f_vote(ta.change(macdSignal) > 0.0)
+
+int macdVotes = vote1 + vote2 + vote3 + vote4 + vote5 + vote6 + vote7 + vote8 + vote9 + vote10
+float macdScore = f_clamp(macdVotes * 10.0, -100.0, 100.0)
+color macdColor = f_scoreColor(macdScore, 0)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  4. STRUCTURAL SWING ENGINE                                            ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_SWING = "04 • Structure / Swings"
+
+int manualLeft = input.int(5, "Manual Left Bars", minval = 1, maxval = 50, group = GRP_SWING)
+int manualRight = input.int(5, "Manual Right Bars", minval = 1, maxval = 50, group = GRP_SWING)
+bool showZigzag = input.bool(true, "Show structural swing lines", group = GRP_SWING)
+bool autoSwingColor = input.bool(true, "Spectral swing colors", group = GRP_SWING)
+color manualSwingColor = input.color(#00F5D4, "Manual swing color", group = GRP_SWING)
+int lineWidth = input.int(3, "Swing line width", minval = 1, maxval = 5, group = GRP_SWING)
+int maxStored = input.int(100, "Maximum stored swings", minval = 20, maxval = 240, group = GRP_SWING)
+
+int autoPivot = 8
+if intraday
+    if tfMult <= 1
+        autoPivot := 3
+    else if tfMult <= 5
+        autoPivot := 5
+    else if tfMult <= 15
+        autoPivot := 6
+
+int leftBars = autoProfile ? autoPivot : manualLeft
+int rightBars = autoProfile ? autoPivot : manualRight
+
+type Swing
+    int bar
+    int t
+    float price
+    int kind
+
+type SwingState
+    int lastKind = 0
+    float lastHighPx = na
+    float prevHighPx = na
+    int lastHighTime = na
+    float lastLowPx = na
+    float prevLowPx = na
+    int lastLowTime = na
+    int trendDir = 0
+
+var SwingState swingState = SwingState.new()
+var array<Swing> highs = array.new<Swing>()
+var array<Swing> lows = array.new<Swing>()
+var array<Swing> path = array.new<Swing>()
+var array<line> segs = array.new<line>()
+
+pushCapped(array<Swing> arr, Swing item, int cap) =>
+    arr.push(item)
+    if arr.size() > cap
+        arr.shift()
+
+replaceLast(array<Swing> arr, Swing item) =>
+    if arr.size() > 0
+        arr.set(arr.size() - 1, item)
+
+updateStructure(SwingState st) =>
+    bool haveStructure = not na(st.lastHighPx) and not na(st.prevHighPx) and not na(st.lastLowPx) and not na(st.prevLowPx)
+    if haveStructure
+        bool hh = st.lastHighPx > st.prevHighPx
+        bool lh = st.lastHighPx < st.prevHighPx
+        bool hl = st.lastLowPx > st.prevLowPx
+        bool ll = st.lastLowPx < st.prevLowPx
+        st.trendDir := hh and hl ? 1 : lh and ll ? -1 : 0
+
+redrawLastSeg() =>
+    if showZigzag and path.size() >= 2 and segs.size() > 0
+        Swing a = path.get(path.size() - 2)
+        Swing b = path.get(path.size() - 1)
+        line ln = segs.get(segs.size() - 1)
+        ln.set_xy1(a.bar, a.price)
+        ln.set_xy2(b.bar, b.price)
+        color updatedColor = autoSwingColor ? (b.price >= a.price ? color.new(bullHot, 0) : color.new(bearHot, 0)) : manualSwingColor
+        ln.set_color(updatedColor)
+
+addSeg() =>
+    if showZigzag and path.size() >= 2
+        Swing a = path.get(path.size() - 2)
+        Swing b = path.get(path.size() - 1)
+        color segColor = autoSwingColor ? (b.price >= a.price ? color.new(bullHot, 0) : color.new(bearHot, 0)) : manualSwingColor
+        line ln = line.new(a.bar, a.price, b.bar, b.price, xloc = xloc.bar_index, color = segColor, width = lineWidth)
+        segs.push(ln)
+        if segs.size() > maxStored * 2
+            line old = segs.shift()
+            line.delete(old)
+
+acceptSwing(SwingState st, int kind, float px, int swingBar, int swingTime) =>
+    int event = 0
+    Swing sw = Swing.new(swingBar, swingTime, px, kind)
+    bool sameSide = st.lastKind == kind and path.size() > 0
+
+    if sameSide
+        Swing previous = path.get(path.size() - 1)
+        bool moreExtreme = kind == 1 ? px > previous.price : px < previous.price
+        if moreExtreme
+            path.set(path.size() - 1, sw)
+            if kind == 1
+                st.lastHighPx := px
+                st.lastHighTime := swingTime
+                replaceLast(highs, sw)
+            else
+                st.lastLowPx := px
+                st.lastLowTime := swingTime
+                replaceLast(lows, sw)
+            redrawLastSeg()
+            updateStructure(st)
+            event := kind
+    else
+        path.push(sw)
+        if path.size() > maxStored * 2
+            path.shift()
+            if segs.size() > 0
+                line old = segs.shift()
+                line.delete(old)
+
+        if kind == 1
+            st.prevHighPx := st.lastHighPx
+            st.lastHighPx := px
+            st.lastHighTime := swingTime
+            pushCapped(highs, sw, maxStored)
+        else
+            st.prevLowPx := st.lastLowPx
+            st.lastLowPx := px
+            st.lastLowTime := swingTime
+            pushCapped(lows, sw, maxStored)
+
+        st.lastKind := kind
+        addSeg()
+        updateStructure(st)
+        event := kind
+
+    event
+
+float ph = ta.pivothigh(high, leftBars, rightBars)
+float pl = ta.pivotlow(low, leftBars, rightBars)
+
+int swingEvent = 0
+if not na(ph)
+    swingEvent := acceptSwing(swingState, 1, high[rightBars], bar_index[rightBars], time[rightBars])
+
+if not na(pl)
+    int lowEvent = acceptSwing(swingState, -1, low[rightBars], bar_index[rightBars], time[rightBars])
+    swingEvent := lowEvent != 0 ? lowEvent : swingEvent
+
+float structureScore = swingState.trendDir == 1 ? 100.0 : swingState.trendDir == -1 ? -100.0 : 0.0
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  5. FUSION ENGINE                                                      ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_FUSION = "05 • Fusion Engine"
+
+float mamaWeight = input.float(0.45, "MAMA Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+float macdWeight = input.float(0.35, "MACD Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+float structureWeight = input.float(0.20, "Structure Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  5B. TDI LINK / CONFLUENCE                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_TDI_LINK = "06 • TDI Link / Confluence"
+
+string tdiIntegration = input.string("Advisory", "TDI Integration", options = ["Off", "Advisory", "Confirm"], group = GRP_TDI_LINK)
+string tdiLinkOverride = input.string("Auto", "TDI Link Detection", options = ["Auto", "Force Unlinked"], group = GRP_TDI_LINK)
+float tdiBusSrc = input.source(close, "TDI Bridge Bus", group = GRP_TDI_LINK,
+ tooltip = "Select TDI ∞ 1d3 → TDI Bridge Bus once. ACW decodes Fusion, Confidence, Energy, Bias and Signal automatically.")
+
+// Single-source TDI semantic bridge decoder. Default close values can never
+// pass the magic/range checks, so an unlinked script safely falls back to native ACW.
+const float TDI_BUS_MAGIC = 73100000000.0
+const float TDI_BUS_MAX_PAYLOAD = 649296810161.0
+float tdiPayload = math.round(tdiBusSrc - TDI_BUS_MAGIC)
+float tdiFusionQ = tdiPayload - math.floor(tdiPayload / 2001.0) * 2001.0
+float tdiRem1 = math.floor(tdiPayload / 2001.0)
+float tdiConfidenceQ = tdiRem1 - math.floor(tdiRem1 / 1001.0) * 1001.0
+float tdiRem2 = math.floor(tdiRem1 / 1001.0)
+float tdiEnergyQ = tdiRem2 - math.floor(tdiRem2 / 2001.0) * 2001.0
+float tdiRem3 = math.floor(tdiRem2 / 2001.0)
+float tdiBiasQ = tdiRem3 - math.floor(tdiRem3 / 3.0) * 3.0
+float tdiRem4 = math.floor(tdiRem3 / 3.0)
+float tdiSignalQ = tdiRem4 - math.floor(tdiRem4 / 3.0) * 3.0
+float tdiRem5 = math.floor(tdiRem4 / 3.0)
+float tdiRegimeQ = tdiRem5 - math.floor(tdiRem5 / 6.0) * 6.0
+float tdiReadyQ = math.floor(tdiRem5 / 6.0)
+
+bool tdiBusRangeOK = not na(tdiBusSrc) and tdiBusSrc >= TDI_BUS_MAGIC and tdiBusSrc <= TDI_BUS_MAGIC + TDI_BUS_MAX_PAYLOAD + 0.5
+bool tdiBusFieldsOK = tdiFusionQ >= 0.0 and tdiFusionQ <= 2000.0 and tdiConfidenceQ >= 0.0 and tdiConfidenceQ <= 1000.0 and tdiEnergyQ >= 0.0 and tdiEnergyQ <= 2000.0 and tdiBiasQ >= 0.0 and tdiBiasQ <= 2.0 and tdiSignalQ >= 0.0 and tdiSignalQ <= 2.0 and tdiRegimeQ >= 0.0 and tdiRegimeQ <= 5.0 and tdiReadyQ >= 0.0 and tdiReadyQ <= 2.0
+bool tdiBusValid = tdiBusRangeOK and tdiBusFieldsOK
+
+float tdiFusion = tdiBusValid ? tdiFusionQ / 10.0 - 100.0 : 0.0
+float tdiConfidence = tdiBusValid ? tdiConfidenceQ / 10.0 : 0.0
+float tdiEnergy = tdiBusValid ? tdiEnergyQ / 10.0 - 100.0 : 0.0
+float tdiBias = tdiBusValid ? tdiBiasQ - 1.0 : 0.0
+float tdiSignal = tdiBusValid ? tdiSignalQ - 1.0 : 0.0
+float tdiReadyDir = tdiBusValid ? tdiReadyQ - 1.0 : 0.0
+string tdiRegimeName = tdiRegimeQ == 0.0 ? "SQUEEZE" : tdiRegimeQ == 1.0 ? "CHOP" : tdiRegimeQ == 2.0 ? "EXHAUSTION" : tdiRegimeQ == 3.0 ? "EXPANSION" : tdiRegimeQ == 4.0 ? "TREND" : "TRANSITION"
+bool tdiExhaustion = tdiBusValid and tdiRegimeQ == 2.0
+
+bool tdiLinked = tdiLinkOverride == "Force Unlinked" ? false : tdiBusValid
+bool tdiActive = tdiIntegration != "Off" and tdiLinked
+
+float weightSum = math.max(mamaWeight + macdWeight + structureWeight, 0.001)
+float fusionRaw = (mamaScore * mamaWeight + macdScore * macdWeight + structureScore * structureWeight) / weightSum
+float efficiencyModifier = 0.88 + 0.12 * efficiency
+float fusionScore = f_clamp(fusionRaw * efficiencyModifier, -100.0, 100.0)
+
+int fusionSign = f_sign(fusionScore)
+float mamaAgreement = fusionSign == 0 ? 0.5 : f_sign(mamaScore) == fusionSign ? 1.0 : 0.0
+float macdAgreement = fusionSign == 0 ? 0.5 : f_sign(macdScore) == fusionSign ? 1.0 : 0.0
+float structureAgreement = structureScore == 0.0 ? 0.5 : fusionSign == 0 ? 0.5 : f_sign(structureScore) == fusionSign ? 1.0 : 0.0
+float agreement = (mamaAgreement + macdAgreement + structureAgreement) / 3.0
+float confidence = f_clamp(math.abs(fusionScore) * (0.80 + 0.20 * agreement) + efficiency * 8.0, 0.0, 100.0)
+
+// ACW ↔ TDI confluence preserves disagreement instead of averaging it away.
+// 1d3 direction comes from TDI's own Bias, with Ready direction allowed to
+// establish direction when Bias is still mixed. Raw Fusion alone cannot grant alignment.
+int acwDir = fusionScore >= 15.0 ? 1 : fusionScore <= -15.0 ? -1 : 0
+int tdiDir = tdiBias > 0.5 ? 1 : tdiBias < -0.5 ? -1 : tdiReadyDir > 0.5 ? 1 : tdiReadyDir < -0.5 ? -1 : 0
+bool sameDirection = tdiActive and acwDir != 0 and acwDir == tdiDir
+bool directionConflict = tdiActive and acwDir != 0 and tdiDir != 0 and acwDir != tdiDir
+bool acwDirectionalOnly = tdiActive and acwDir != 0 and tdiDir == 0
+bool tdiDirectionalOnly = tdiActive and acwDir == 0 and tdiDir != 0
+bool tdiTimingReady = sameDirection and tdiReadyDir == acwDir and not tdiExhaustion
+
+float confluenceScore = fusionScore
+float confluenceConfidence = confidence
+string confluenceState = "ACW ONLY"
+string timingState = "NATIVE"
+
+if tdiActive
+    float minConf = math.min(confidence, tdiConfidence) / 100.0
+    if sameDirection
+        float room = 100.0 - math.abs(fusionScore)
+        float boostWeight = 0.15 + 0.25 * minConf
+        float boost = math.min(math.abs(tdiFusion), room) * boostWeight
+        confluenceScore := f_clamp(fusionScore + acwDir * boost, -100.0, 100.0)
+        confluenceConfidence := f_clamp(0.55 * confidence + 0.30 * tdiConfidence + 15.0 * minConf, 0.0, 100.0)
+        confluenceState := "ALIGNED"
+        timingState := "WAIT TIMING"
+        if tdiExhaustion
+            timingState := tdiFusion >= 0.0 ? "EXHAUST ↑" : "EXHAUST ↓"
+        else if tdiTimingReady
+            timingState := "READY"
+        else if tdiRegimeName == "SQUEEZE"
+            timingState := "WAIT • SQUEEZE"
+        else if tdiRegimeName == "CHOP"
+            timingState := "WAIT • CHOP"
+    else if directionConflict
+        confluenceScore := fusionScore * 0.65
+        confluenceConfidence := f_clamp(math.min(confidence, tdiConfidence) * 0.55, 0.0, 100.0)
+        confluenceState := "CONFLICT"
+        timingState := "BLOCKED"
+    else if acwDirectionalOnly
+        confluenceScore := fusionScore
+        confluenceConfidence := confidence * 0.88
+        confluenceState := "ACW LEADS"
+        timingState := "WAIT TIMING"
+    else if tdiDirectionalOnly
+        confluenceScore := tdiFusion
+        confluenceConfidence := tdiConfidence * 0.82
+        confluenceState := "TDI LEADS"
+        timingState := "WAIT CONTEXT"
+    else
+        confluenceScore := fusionScore
+        confluenceConfidence := f_clamp(0.70 * confidence + 0.30 * tdiConfidence, 0.0, 100.0)
+        confluenceState := "NEUTRAL"
+        timingState := "WAIT"
+
+// Structural context prevents bullish/bearish agreement from being mislabeled
+// as a full trend when confirmed swing structure still points the other way.
+bool recoveryContext = tdiActive and sameDirection and confluenceScore > 15.0 and swingState.trendDir == -1
+bool pullbackContext = tdiActive and sameDirection and confluenceScore < -15.0 and swingState.trendDir == 1
+string contextState = confluenceState
+if recoveryContext
+    contextState := tdiExhaustion ? "RECOVERY ↑ / EXH" : "RECOVERY ↑"
+else if pullbackContext
+    contextState := tdiExhaustion ? "PULLBACK ↓ / EXH" : "PULLBACK ↓"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  6. MARKET STATE / REGIME                                              ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+bool compression = volRank < 25.0 and math.abs(macdScore) <= 40.0
+bool expansion = volRank >= 65.0 and math.abs(fusionScore) >= 50.0
+bool fullAlignment = swingState.trendDir != 0 and f_sign(mamaScore) == swingState.trendDir and f_sign(macdScore) == swingState.trendDir
+bool conflict = math.abs(mamaScore) >= 40.0 and math.abs(macdScore) >= 40.0 and f_sign(mamaScore) != f_sign(macdScore)
+
+string regime = "TRANSITION"
+if compression
+    regime := "COMPRESSION"
+else if expansion
+    regime := "EXPANSION"
+else if fullAlignment
+    regime := "TREND"
+else if conflict
+    regime := "CONFLICT"
+
+string biasName = fusionScore >= 25.0 ? "BULLISH" : fusionScore <= -25.0 ? "BEARISH" : "NEUTRAL"
+
+string actionName = "WAIT"
+if fusionScore >= 65.0 and confidence >= 60.0
+    actionName := "LONG IMPULSE"
+else if fusionScore >= 35.0
+    actionName := "LONG WATCH"
+else if fusionScore <= -65.0 and confidence >= 60.0
+    actionName := "SHORT IMPULSE"
+else if fusionScore <= -35.0
+    actionName := "SHORT WATCH"
+
+string linkedAction = actionName
+if tdiActive
+    linkedAction := "WAIT"
+    if directionConflict
+        linkedAction := "WAIT • CONFLICT"
+    else if acwDirectionalOnly
+        linkedAction := "WAIT TIMING"
+    else if tdiDirectionalOnly
+        linkedAction := "WAIT CONTEXT"
+    else if sameDirection
+        if tdiExhaustion
+            linkedAction := "WAIT • EXHAUST"
+        else if not tdiTimingReady
+            linkedAction := "WAIT TIMING"
+        else if recoveryContext
+            linkedAction := "LONG WATCH"
+        else if pullbackContext
+            linkedAction := "SHORT WATCH"
+        else if math.abs(confluenceScore) >= 65.0 and confluenceConfidence >= 62.0
+            linkedAction := confluenceScore > 0.0 ? "LONG SYNC" : "SHORT SYNC"
+        else if math.abs(confluenceScore) >= 35.0
+            linkedAction := confluenceScore > 0.0 ? "LONG WATCH" : "SHORT WATCH"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  7. SPECTRAL VISUAL ENGINE                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+plot(showMama and mamaGlow ? mama : na, "MAMA Aura Wide", color = color.new(mamaColor, 90), linewidth = 7)
+plot(showMama and mamaGlow ? mama : na, "MAMA Aura", color = color.new(mamaColor, 76), linewidth = 4)
+pMama = plot(showMama ? mama : na, "MAMA Core", color = mamaColor, linewidth = mamaWidth)
+
+color famaColor = f_scoreColor(mamaScore, 32)
+plot(showMama and mamaGlow ? fama : na, "FAMA Aura", color = color.new(famaColor, 88), linewidth = 5)
+pFama = plot(showMama ? fama : na, "FAMA Core", color = famaColor, linewidth = math.max(1, mamaWidth - 1))
+
+int mamaFillTransparency = int(math.round(f_clamp(94.0 - math.abs(mamaScore) * 0.18, 74.0, 94.0)))
+color mamaFillColor = mama > fama ? color.new(bullBase, mamaFillTransparency) : color.new(bearBase, mamaFillTransparency)
+fill(pMama, pFama, color = fillMama ? mamaFillColor : na, title = "MAMA/FAMA Spectral Energy")
+
+plot(showMacdMA and emaGlow ? fastMA : na, "Fast EMA Aura", color = color.new(macdColor, 90), linewidth = 6)
+plot(showMacdMA and emaGlow ? slowMA : na, "Slow EMA Aura", color = color.new(macdColor, 93), linewidth = 5)
+plot(showMacdMA ? fastMA : na, "MACD Fast EMA", color = color.new(macdColor, 5), linewidth = 2)
+plot(showMacdMA ? slowMA : na, "MACD Slow EMA", color = color.new(macdColor, 46), linewidth = 1)
+
+bool heatNeedsTdi = heatSource == "TDI Fusion" or heatSource == "ACW + TDI Confluence"
+bool renderSourceFallback = heatNeedsTdi and not tdiActive
+float heatScore = fusionScore
+float heatConfidence = confidence
+if heatSource == "MACD Council"
+    heatScore := macdScore
+else if heatSource == "TDI Fusion" and tdiActive
+    heatScore := tdiFusion
+    heatConfidence := tdiConfidence
+else if heatSource == "ACW + TDI Confluence" and tdiActive
+    heatScore := confluenceScore
+    heatConfidence := confluenceConfidence
+
+float heatStrength = math.abs(heatScore) / 100.0
+float regimeBoost = expansion ? 1.15 : fullAlignment ? 1.05 : compression ? 0.82 : 0.94
+float alignmentHeatBoost = sameDirection ? (tdiTimingReady ? 1.30 : tdiExhaustion ? 0.92 : 1.08) : 1.0
+float leadHeatPenalty = acwDirectionalOnly or tdiDirectionalOnly ? 0.84 : 1.0
+float conflictHeatBoost = directionConflict ? 1.12 : 1.0
+float visibleHeatStrength = f_clamp(math.max(heatStrength, minHeatStrength) * regimeBoost * alignmentHeatBoost * leadHeatPenalty * conflictHeatBoost, 0.0, 1.0)
+int dynamicHeatTransparency = int(math.round(98.0 - (98.0 - heatTransparency) * visibleHeatStrength))
+int conflictHeatTransparency = int(f_clamp(dynamicHeatTransparency - 2.0, 0.0, 100.0))
+color heatColor = directionConflict and tdiActive ? color.new(#FFAB40, conflictHeatTransparency) : f_scoreColor(heatScore, dynamicHeatTransparency)
+bgcolor(showHeat ? heatColor : na, title = "ACW Spectral Heat")
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  8. IMPULSE / CROSS EVENTS                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+bool signalGate = not confirmedOnly or barstate.isconfirmed
+bool mamaCrossUp = ta.crossover(mama, fama)
+bool mamaCrossDown = ta.crossunder(mama, fama)
+
+int impulseCooldown = 4
+if intraday
+    if tfMult <= 1
+        impulseCooldown := 12
+    else if tfMult <= 5
+        impulseCooldown := 8
+    else if tfMult <= 15
+        impulseCooldown := 6
+
+float rearmRatio = 0.72
+var int lastBullImpulseBar = na
+var int lastBearImpulseBar = na
+var bool bullArmed = true
+var bool bearArmed = true
+
+if fusionScore < 65.0 * rearmRatio or acwDir < 0
+    bullArmed := true
+if fusionScore > -65.0 * rearmRatio or acwDir > 0
+    bearArmed := true
+
+bool bullCooldownOK = na(lastBullImpulseBar) or bar_index - lastBullImpulseBar >= impulseCooldown
+bool bearCooldownOK = na(lastBearImpulseBar) or bar_index - lastBearImpulseBar >= impulseCooldown
+bool bullNativeEligible = signalGate and fusionScore >= 65.0 and confidence >= 60.0 and bullArmed and bullCooldownOK
+bool bearNativeEligible = signalGate and fusionScore <= -65.0 and confidence >= 60.0 and bearArmed and bearCooldownOK
+
+bool bullImpulse = bullNativeEligible
+bool bearImpulse = bearNativeEligible
+
+if bullImpulse
+    lastBullImpulseBar := bar_index
+    bullArmed := false
+if bearImpulse
+    lastBearImpulseBar := bar_index
+    bearArmed := false
+
+bool confirmMode = tdiIntegration == "Confirm"
+bool tdiBullTiming = tdiActive and tdiTimingReady and acwDir == 1
+bool tdiBearTiming = tdiActive and tdiTimingReady and acwDir == -1
+bool syncBullBase = bullImpulse and tdiActive and sameDirection and tdiTimingReady and not directionConflict and not recoveryContext and not tdiExhaustion and confluenceConfidence >= 62.0 and tdiConfidence >= 55.0 and tdiBullTiming
+bool syncBearBase = bearImpulse and tdiActive and sameDirection and tdiTimingReady and not directionConflict and not pullbackContext and not tdiExhaustion and confluenceConfidence >= 62.0 and tdiConfidence >= 55.0 and tdiBearTiming
+bool syncBullImpulse = syncBullBase and (not confirmMode or tdiSignal > 0.5)
+bool syncBearImpulse = syncBearBase and (not confirmMode or tdiSignal < -0.5)
+
+// In Confirm mode only the synchronized event receives premium classification.
+// Native ACW impulses remain visible and keep their original alert identity.
+bool nativeBullMarker = bullImpulse and not syncBullImpulse
+bool nativeBearMarker = bearImpulse and not syncBearImpulse
+bool earlyBullDot = showSignals and not directionConflict and fusionScore >= 45.0 and nz(fusionScore[1], fusionScore) < 45.0 and confidence >= 52.0
+bool earlyBearDot = showSignals and not directionConflict and fusionScore <= -45.0 and nz(fusionScore[1], fusionScore) > -45.0 and confidence >= 52.0
+bool compressionReleaseBull = signalGate and compression[1] and not compression and fusionScore > 35.0
+bool compressionReleaseBear = signalGate and compression[1] and not compression and fusionScore < -35.0
+
+plotshape(earlyBullDot, title = "Bull Early Alignment", style = shape.circle, location = location.belowbar, color = color.new(bullBase, 25), size = size.tiny)
+plotshape(earlyBearDot, title = "Bear Early Alignment", style = shape.circle, location = location.abovebar, color = color.new(bearBase, 25), size = size.tiny)
+plotshape(showSignals and nativeBullMarker, title = "Bull Fusion Impulse", style = shape.diamond, location = location.belowbar, color = color.new(bullHot, 10), size = size.tiny)
+plotshape(showSignals and nativeBearMarker, title = "Bear Fusion Impulse", style = shape.diamond, location = location.abovebar, color = color.new(bearHot, 10), size = size.tiny)
+plotshape(showSignals and syncBullImpulse, title = "Synchronized Bull Impulse", style = shape.diamond, location = location.belowbar, color = bullHot, size = size.normal)
+plotshape(showSignals and syncBearImpulse, title = "Synchronized Bear Impulse", style = shape.diamond, location = location.abovebar, color = bearHot, size = size.normal)
+plotshape(showSignals and compressionReleaseBull, title = "Bull Compression Release", style = shape.triangleup, location = location.belowbar, color = color.new(bullBase, 10), size = size.tiny)
+plotshape(showSignals and compressionReleaseBear, title = "Bear Compression Release", style = shape.triangledown, location = location.abovebar, color = color.new(bearBase, 10), size = size.tiny)
+plotshape(markMamaCross and mamaCrossUp, title = "MAMA Bull Cross", style = shape.circle, location = location.belowbar, color = color.new(bullBase, 20), size = size.tiny)
+plotshape(markMamaCross and mamaCrossDown, title = "MAMA Bear Cross", style = shape.circle, location = location.abovebar, color = color.new(bearBase, 20), size = size.tiny)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  9. OPTIONAL CANDLE INTELLIGENCE                                       ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_CANDLES = "06 • Candle Intelligence"
+
+bool colorBars = input.bool(true, "Color candles by Fusion Score", group = GRP_CANDLES)
+string candleSource = input.string("Confluence", "Candle Source", options = ["ACW", "TDI", "Confluence"], group = GRP_CANDLES)
+int barTransparency = input.int(18, "Candle transparency", minval = 0, maxval = 90, group = GRP_CANDLES)
+bool candleNeedsTdi = candleSource == "TDI" or candleSource == "Confluence"
+float candleScore = fusionScore
+if candleSource == "TDI" and tdiActive
+    candleScore := tdiFusion
+else if candleSource == "Confluence" and tdiActive
+    candleScore := confluenceScore
+
+bool candleFallback = candleNeedsTdi and not tdiActive
+int candleAlpha = math.abs(candleScore) >= 55.0 ? math.max(barTransparency, 12) : math.abs(candleScore) < 18.0 ? 58 : math.max(barTransparency + 10, 22)
+color fusionBarColor = math.abs(candleScore) < 18.0 ? color.new(neutralBase, 58) : directionConflict and tdiActive ? color.new(#B388FF, 28) : f_scoreColor(candleScore, candleAlpha)
+barcolor(colorBars ? fusionBarColor : na)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║ 10. DASHBOARD                                                          ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_DASH = "07 • Dashboard"
+
+string dashSizeInput = input.string("Tiny", "Dashboard size", options = ["Tiny", "Small", "Normal"], group = GRP_DASH)
+int dashTransparency = input.int(60, "HUD transparency", minval = 25, maxval = 95, group = GRP_DASH)
+string dashDetail = input.string("Full", "Dashboard detail", options = ["Compact", "Full"], group = GRP_DASH)
+
+dashTextSize = dashSizeInput == "Tiny" ? size.tiny : dashSizeInput == "Normal" ? size.normal : size.small
+
+var table dash = table.new(
+    position.top_right,
+    2,
+    10,
+    bgcolor = color.new(darkBase, dashTransparency),
+    frame_color = color.new(neutralBase, 58),
+    frame_width = 1,
+    border_color = color.new(neutralBase, 82),
+    border_width = 1)
+
+if barstate.isfirst
+    dash.merge_cells(0, 0, 1, 0)
+
+f_dashCell(table tbl, int column, int row, string txt, color txtColor, color bgColor, string halign) =>
+    tbl.cell(
+        column,
+        row,
+        txt,
+        text_color = txtColor,
+        bgcolor = bgColor,
+        text_size = dashTextSize,
+        text_halign = halign == "left" ? text.align_left : text.align_right)
+
+if showDashboard and barstate.islast
+    color acwColor = f_scoreColor(fusionScore, 0)
+    color tdiColor = f_scoreColor(tdiFusion, 0)
+    color confColor = f_scoreColor(confluenceScore, 0)
+    color regimeColor = color.new(neutralBase, 0)
+    if regime == "EXPANSION"
+        regimeColor := color.new(bullHot, 0)
+    else if regime == "COMPRESSION"
+        regimeColor := #FFD54F
+    else if regime == "CONFLICT"
+        regimeColor := #FF9100
+    else if regime == "TREND"
+        regimeColor := acwColor
+
+    if directionConflict and tdiActive
+        regimeColor := #FFAB40
+
+    string structureName = swingState.trendDir == 1 ? "HH / HL ↑" : swingState.trendDir == -1 ? "LH / LL ↓" : "MIXED"
+    color structureColor = swingState.trendDir == 1 ? bullHot : swingState.trendDir == -1 ? bearHot : neutralBase
+    string linkText = tdiActive ? "LINKED" : tdiIntegration == "Off" ? "OFF" : "UNLINKED"
+    bool anyFallback = renderSourceFallback or candleFallback
+    string headerText = tdiActive ? "ACW ∞  CONFLUENCE" : "ACW ∞  NATIVE • TDI " + linkText
+    if anyFallback
+        headerText += " • FALLBACK"
+    color headerColor = tdiActive ? confColor : acwColor
+
+    dash.cell(0, 0, headerText, text_color = color.white, bgcolor = color.new(headerColor, 42), text_size = dashTextSize, text_halign = text.align_center)
+
+    if tdiActive
+        color conflictBg = color.new(#FFAB40, 48)
+        color confluenceBg = directionConflict ? conflictBg : sameDirection ? color.new(confColor, 30) : color.new(confColor, 55)
+        color actionBg = directionConflict ? conflictBg : sameDirection ? color.new(confColor, 26) : color.new(confColor, 48)
+
+        f_dashCell(dash, 0, 1, "PROFILE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 1, profileName, color.white, color.new(darkBase, dashTransparency), "right")
+        f_dashCell(dash, 0, 2, "REGIME", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 2, directionConflict ? "CONFLICT" : regime, color.white, color.new(regimeColor, 46), "right")
+        f_dashCell(dash, 0, 3, "STRUCTURE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 3, structureName, structureColor, color.new(structureColor, 70), "right")
+        f_dashCell(dash, 0, 4, "ACW", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 4, str.tostring(fusionScore, "#.0"), acwColor, color.new(acwColor, 62), "right")
+        f_dashCell(dash, 0, 5, "TDI", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 5, str.tostring(tdiFusion, "#.0") + " • " + (tdiBias > 0.5 ? "BULL" : tdiBias < -0.5 ? "BEAR" : "MIX") + " • " + str.tostring(tdiConfidence, "#") + "%", tdiColor, color.new(tdiColor, 62), "right")
+        f_dashCell(dash, 0, 6, "CONFLUENCE", color.new(color.white, 18), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 6, contextState + "  " + str.tostring(confluenceScore, "#.0"), color.white, confluenceBg, "right")
+        f_dashCell(dash, 0, 7, "CONFIDENCE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 7, str.tostring(confluenceConfidence, "#.0") + "%", color.white, color.new(confColor, 62), "right")
+        f_dashCell(dash, 0, 8, "TIMING", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 8, timingState, color.white, directionConflict ? conflictBg : color.new(tdiColor, 66), "right")
+        f_dashCell(dash, 0, 9, "ACTION", color.white, color.new(darkBase, 38), "left")
+        f_dashCell(dash, 1, 9, linkedAction, color.white, actionBg, "right")
+    else
+        f_dashCell(dash, 0, 1, "PROFILE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 1, profileName, color.white, color.new(darkBase, dashTransparency), "right")
+        f_dashCell(dash, 0, 2, "REGIME", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 2, regime, color.white, color.new(regimeColor, 50), "right")
+        f_dashCell(dash, 0, 3, "STRUCTURE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 3, structureName, structureColor, color.new(structureColor, 70), "right")
+        f_dashCell(dash, 0, 4, "ACW", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 4, str.tostring(fusionScore, "#.0"), acwColor, color.new(acwColor, 62), "right")
+        f_dashCell(dash, 0, 5, "CONFIDENCE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 5, str.tostring(confidence, "#.0") + "%", color.white, color.new(acwColor, 72), "right")
+        f_dashCell(dash, 0, 6, "MACD", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 6, str.tostring(macdScore, "#.0"), macdColor, color.new(macdColor, 72), "right")
+        f_dashCell(dash, 0, 7, "MAMA", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 7, str.tostring(mamaScore, "#.0"), mamaColor, color.new(mamaColor, 72), "right")
+        f_dashCell(dash, 0, 8, "ACTION", color.white, color.new(darkBase, 38), "left")
+        f_dashCell(dash, 1, 8, actionName, color.white, color.new(acwColor, 36), "right")
+        f_dashCell(dash, 0, 9, "TDI LINK", color.new(color.white, 42), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 9, anyFallback ? "FALLBACK" : linkText, anyFallback ? #FFD54F : neutralBase, color.new(darkBase, dashTransparency), "right")
+else if not showDashboard
+    dash.clear(0, 0, 1, 9)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║ 11. ALERTS                                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+alertcondition(bullImpulse, title = "ACW ∞ Bull Fusion Impulse", message = "ACW Spectral Fusion: Bull impulse detected.")
+alertcondition(bearImpulse, title = "ACW ∞ Bear Fusion Impulse", message = "ACW Spectral Fusion: Bear impulse detected.")
+alertcondition(syncBullImpulse, title = "ACW ∞ Synchronized Bull Impulse", message = "ACW Spectral Fusion: synchronized bull impulse detected.")
+alertcondition(syncBearImpulse, title = "ACW ∞ Synchronized Bear Impulse", message = "ACW Spectral Fusion: synchronized bear impulse detected.")
+alertcondition(compressionReleaseBull, title = "ACW ∞ Bull Compression Release", message = "ACW Spectral Fusion: Bullish compression release.")
+alertcondition(compressionReleaseBear, title = "ACW ∞ Bear Compression Release", message = "ACW Spectral Fusion: Bearish compression release.")
+alertcondition(mamaCrossUp, title = "ACW ∞ MAMA/FAMA Bull Cross", message = "ACW Spectral Fusion: MAMA crossed above FAMA.")
+alertcondition(mamaCrossDown, title = "ACW ∞ MAMA/FAMA Bear Cross", message = "ACW Spectral Fusion: MAMA crossed below FAMA.")
