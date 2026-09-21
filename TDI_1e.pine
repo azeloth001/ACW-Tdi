@@ -1,0 +1,584 @@
+//@version=6
+indicator(
+     title = "TDI ∞ Adaptive Spectral Engine 1e — Fusion",
+     shorttitle = "TDI ∞ 1e",
+     overlay = false,
+     precision = 2,
+     max_labels_count = 150,
+     max_lines_count = 150,
+     explicit_plot_zorder = true)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TDI ∞ ADAPTIVE SPECTRAL ENGINE 1e
+// Core DNA: classic TDI RSI lattice (RSI + volatility bands + Fast/Slow MAs)
+// Upgrade: fixed-length dual-branch adaptation, regime engine, fusion/confidence,
+//          dynamic visual hierarchy and dashboard.
+//
+// Design rule: adaptation is done by BLENDING precomputed stable/responsive
+// branches. We do not feed bar-varying lengths into MA functions.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const string GRP_TDI     = "01 • TDI Core"
+const string GRP_ADAPT   = "02 • Adaptive Engine"
+const string GRP_QUALITY = "03 • Quality / Regime"
+const string GRP_SIG     = "04 • Context / Signals"
+const string GRP_VIS     = "05 • Visual Spectrum"
+const string GRP_DASH    = "06 • Dashboard"
+const string GRP_COL     = "07 • Custom Colors"
+
+int rsiPeriod  = input.int(14, "RSI Period", minval = 1, group = GRP_TDI)
+int bandLength = input.int(20, "Band Length", minval = 2, group = GRP_TDI)
+int fastLen    = input.int(9,  "Fast MA on RSI", minval = 1, group = GRP_TDI)
+int slowLen    = input.int(21, "Slow MA on RSI", minval = 2, group = GRP_TDI)
+int rsiPlotLen = input.int(14, "Purple Plot Length", minval = 1, group = GRP_TDI)
+float src      = input.source(close, "Source", group = GRP_TDI)
+float bandMult = input.float(1.6185, "Band Multiplier", minval = 0.1, step = 0.0005, group = GRP_TDI)
+string maType  = input.string("SMA", "TDI MA Type", options = ["SMA", "EMA", "RMA", "WMA", "HMA"], group = GRP_TDI)
+string plotType = input.string("SMA", "Purple Plot Smoother", options = ["SMA", "EMA", "RMA", "WMA", "HMA", "RAW"], group = GRP_TDI)
+
+bool adaptiveOn = input.bool(true, "Adaptive Engine", group = GRP_ADAPT)
+string adaptiveProfile = input.string("Auto", "Adaptive Profile", options = ["Auto", "Scalp 1m", "Scalp 3–5m", "Balanced", "Smooth"], group = GRP_ADAPT,
+ tooltip = "Auto changes responsiveness and quality floors with chart timeframe. Adaptation blends stable and responsive branches; it does not use illegal series lengths.")
+int adaptLookback = input.int(100, "State Lookback", minval = 30, maxval = 500, group = GRP_ADAPT)
+int efficiencyLen = input.int(10, "RSI Efficiency Length", minval = 3, maxval = 50, group = GRP_ADAPT)
+float maxResponse = input.float(0.92, "Maximum Responsive Blend", minval = 0.20, maxval = 1.00, step = 0.01, group = GRP_ADAPT)
+
+float squeezeRankMax = input.float(18.0, "Squeeze Rank ≤", minval = 3, maxval = 40, step = 1, group = GRP_QUALITY)
+float baseConfFloor  = input.float(58.0, "Base Confidence Floor", minval = 35, maxval = 90, step = 1, group = GRP_QUALITY)
+float baseFusionFloor = input.float(42.0, "Base Fusion Floor", minval = 20, maxval = 80, step = 1, group = GRP_QUALITY)
+bool strictEntryZones = input.bool(true, "Quality triggers require >55 / <45", group = GRP_QUALITY)
+
+string htfTf = input.timeframe("60", "Higher-TF Context", group = GRP_SIG)
+string htfMode = input.string("Confirmed", "HTF Mode", options = ["Confirmed", "Developing"], group = GRP_SIG,
+ tooltip = "Confirmed uses the previous closed HTF bar for stable context. Developing reacts sooner but can change before the HTF bar closes.")
+bool showQualifiedRelease = input.bool(true, "Qualified Squeeze Release", group = GRP_SIG)
+bool showDivergence = input.bool(false, "Qualified Divergence Radar", group = GRP_SIG)
+int divPivotLen = input.int(5, "Divergence Pivot", minval = 2, maxval = 20, group = GRP_SIG)
+float divMinRsiDelta = input.float(2.5, "Min RSI Separation", minval = 0.5, step = 0.5, group = GRP_SIG)
+float divMinPriceAtr = input.float(0.25, "Min Price Excursion × ATR", minval = 0.0, step = 0.05, group = GRP_SIG)
+bool divExtremeFilter = input.bool(true, "Divergence requires <45 / >55", group = GRP_SIG)
+
+string theme = input.string("Aurora", "Theme", options = ["Aurora", "Ocean Neon", "Royal Gold", "Zeiierman Night", "Classic TDI"], group = GRP_VIS)
+string visualMode = input.string("Spectrum", "Visual Mode", options = ["Spectrum", "Clean", "Research"], group = GRP_VIS)
+bool showRsiPlot   = input.bool(true,  "Purple Plot", group = GRP_VIS)
+bool showFills     = input.bool(true,  "Band Fills", group = GRP_VIS)
+bool showEnergy    = input.bool(true,  "Fast–Slow Energy Field", group = GRP_VIS)
+bool showZones     = input.bool(true,  "Trade Zones", group = GRP_VIS)
+bool showAura      = input.bool(true,  "Fast-Line Aura", group = GRP_VIS)
+bool showField     = input.bool(true,  "Regime Background Field", group = GRP_VIS)
+bool showSqueeze   = input.bool(true,  "Squeeze / Release Events", group = GRP_VIS)
+bool showShark     = input.bool(false, "Shark-Fin Events", group = GRP_VIS)
+bool showQualityX  = input.bool(true,  "Adaptive Quality Triggers", group = GRP_VIS)
+bool showCrossDots = input.bool(false, "All Fast/Slow Crosses", group = GRP_VIS)
+
+bool showDash = input.bool(true, "Status Dashboard", group = GRP_DASH)
+string dashMode = input.string("Full", "Dashboard Mode", options = ["Compact", "Full", "Diagnostic"], group = GRP_DASH)
+string dashPos = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left"], group = GRP_DASH)
+string dashSize = input.string("Tiny", "Text Size", options = ["Tiny", "Small"], group = GRP_DASH)
+int dashAlpha = input.int(88, "HUD Transparency", minval = 0, maxval = 95, group = GRP_DASH, tooltip = "Higher = more transparent. Tiny + 85–92 works well on mobile.")
+
+color customBull = input.color(#00E5FF, "Bull", group = GRP_COL, inline = "c1")
+color customBear = input.color(#FF1744, "Bear", group = GRP_COL, inline = "c1")
+color customAccent = input.color(#C77DFF, "Accent", group = GRP_COL, inline = "c2")
+color customGold = input.color(#FFD54F, "Gold", group = GRP_COL, inline = "c2")
+bool useCustomColors = input.bool(false, "Use Custom Colors", group = GRP_COL)
+
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_lerp(float a, float b, float w) =>
+    a + (b - a) * f_clamp(w, 0.0, 1.0)
+
+f_ma(float x, int len, string typ) =>
+    float emaVal = ta.ema(x, len)
+    float rmaVal = ta.rma(x, len)
+    float wmaVal = ta.wma(x, len)
+    float hmaVal = ta.hma(x, len)
+    float smaVal = ta.sma(x, len)
+    switch typ
+        "EMA" => emaVal
+        "RMA" => rmaVal
+        "WMA" => wmaVal
+        "HMA" => hmaVal
+        "RAW" => x
+        => smaVal
+
+f_sign(float x) =>
+    x > 0 ? 1.0 : x < 0 ? -1.0 : 0.0
+
+f_htfState() =>
+    float r = ta.rsi(src, rsiPeriod)
+    float f = f_ma(r, fastLen, maType)
+    float s = f_ma(r, slowLen, maType)
+    float b = f_ma(r, bandLength, maType)
+    f >= s and b >= 50.0 ? 1.0 : f < s and b < 50.0 ? -1.0 : 0.0
+
+f_themeBull(string t) =>
+    switch t
+        "Ocean Neon"      => #00E5FF
+        "Royal Gold"      => #FFD740
+        "Zeiierman Night" => #00E676
+        "Classic TDI"     => #26C6DA
+        => #00F5D4
+
+f_themeBear(string t) =>
+    switch t
+        "Ocean Neon"      => #FF4081
+        "Royal Gold"      => #FF6D00
+        "Zeiierman Night" => #FF1744
+        "Classic TDI"     => #EF5350
+        => #FF2D75
+
+f_themeAccent(string t) =>
+    switch t
+        "Ocean Neon"      => #2979FF
+        "Royal Gold"      => #B388FF
+        "Zeiierman Night" => #7C4DFF
+        "Classic TDI"     => #AB47BC
+        => #C77DFF
+
+f_themeGold(string t) =>
+    switch t
+        "Ocean Neon"      => #FFD740
+        "Royal Gold"      => #FFE082
+        "Zeiierman Night" => #FFCA28
+        "Classic TDI"     => #FFB300
+        => #FFD54F
+
+color bull = useCustomColors ? customBull : f_themeBull(theme)
+color bear = useCustomColors ? customBear : f_themeBear(theme)
+color accent = useCustomColors ? customAccent : f_themeAccent(theme)
+color gold = useCustomColors ? customGold : f_themeGold(theme)
+color neutral = #90A4AE
+color dark = #0D1117
+
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║  LOCAL TREND CARRIER — PRICE DOMAIN                                      ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+const string GRP_TREND = "02B • Local Trend Carrier"
+int carrierLen = input.int(16, "Persistence Window", minval = 6, maxval = 60, group = GRP_TREND)
+int carrierAtrLen = input.int(14, "Carrier ATR Length", minval = 5, maxval = 50, group = GRP_TREND)
+int geometryFastLen = input.int(21, "Geometry Fast EMA", minval = 5, maxval = 100, group = GRP_TREND)
+int geometrySlowLen = input.int(50, "Geometry Slow EMA", minval = 10, maxval = 200, group = GRP_TREND)
+float trendEnter = input.float(24.0, "Trend Enter", minval = 10.0, maxval = 50.0, step = 1.0, group = GRP_TREND)
+float trendHold = input.float(8.0, "Trend Hold", minval = 2.0, maxval = 20.0, step = 1.0, group = GRP_TREND)
+int flowLen = input.int(30, "OBV Flow Memory", minval = 10, maxval = 100, group = GRP_TREND)
+int flowSlopeLen = input.int(5, "OBV Flow Slope", minval = 2, maxval = 20, group = GRP_TREND)
+
+float carrierAtr = ta.atr(carrierAtrLen)
+float carrierAtrSafe = math.max(nz(carrierAtr, 0.0), syminfo.mintick)
+float carrierNet = not na(src[carrierLen]) ? src - src[carrierLen] : 0.0
+float carrierTravel = ta.sma(math.abs(ta.change(src)), carrierLen) * carrierLen
+float carrierEff = carrierTravel > 0.0 ? math.abs(carrierNet) / carrierTravel : 0.0
+float signedEfficiency = f_clamp(f_sign(carrierNet) * carrierEff * 100.0, -100.0, 100.0)
+float displacementScore = f_clamp((carrierNet / carrierAtrSafe) * 22.0, -100.0, 100.0)
+float pricePersistence = f_clamp(0.60 * signedEfficiency + 0.40 * displacementScore, -100.0, 100.0)
+
+float geometryFast = ta.ema(src, geometryFastLen)
+float geometrySlow = ta.ema(src, geometrySlowLen)
+float geometrySepScore = f_clamp(((geometryFast - geometrySlow) / carrierAtrSafe) * 55.0, -100.0, 100.0)
+float geometrySlopeScore = f_clamp(((geometryFast - nz(geometryFast[5], geometryFast)) / carrierAtrSafe) * 38.0, -100.0, 100.0)
+float trendGeometry = f_clamp(0.65 * geometrySepScore + 0.35 * geometrySlopeScore, -100.0, 100.0)
+float priceCore = f_clamp(0.55 * pricePersistence + 0.45 * trendGeometry, -100.0, 100.0)
+
+var int trendState = 0
+if priceCore >= trendEnter
+    trendState := 1
+else if priceCore <= -trendEnter
+    trendState := -1
+else if trendState == 1 and priceCore > trendHold
+    trendState := 1
+else if trendState == -1 and priceCore < -trendHold
+    trendState := -1
+else
+    trendState := 0
+
+bool flowAvailable = not na(volume) and nz(ta.sma(volume, 20), 0.0) > 0.0
+float signedVolume = src > nz(src[1], src) ? nz(volume, 0.0) : src < nz(src[1], src) ? -nz(volume, 0.0) : 0.0
+float obvLocal = ta.cum(flowAvailable ? signedVolume : 0.0)
+float obvBase = ta.ema(obvLocal, flowLen)
+float obvTravel = ta.sma(math.abs(ta.change(obvLocal)), flowLen) * flowLen
+float obvScale = math.max(nz(obvTravel, 0.0), 1.0)
+float obvRelativeScore = f_clamp(((obvLocal - obvBase) / obvScale) * 260.0, -100.0, 100.0)
+float obvSlopeScore = f_clamp(((obvBase - nz(obvBase[flowSlopeLen], obvBase)) / obvScale) * 420.0, -100.0, 100.0)
+float obvSide = obvLocal > obvBase ? 1.0 : obvLocal < obvBase ? -1.0 : 0.0
+int obvPersistenceLen = math.max(5, int(math.round(flowLen * 0.33)))
+float obvPersistenceScore = f_clamp(ta.sma(obvSide, obvPersistenceLen) * 100.0, -100.0, 100.0)
+float flowScoreRaw = f_clamp(0.45 * obvRelativeScore + 0.30 * obvSlopeScore + 0.25 * obvPersistenceScore, -100.0, 100.0)
+float flowScore = flowAvailable ? flowScoreRaw : 0.0
+float flowInfluence = flowAvailable ? f_clamp(flowScore * 0.10, -10.0, 10.0) : 0.0
+float trendCarrier = f_clamp(priceCore + flowInfluence, -100.0, 100.0)
+string flowState = not flowAvailable ? "N/A" : trendState == 0 or math.abs(flowScore) < 15.0 ? "NEUTRAL" : flowScore * trendState > 0.0 ? "CONFIRM" : "OPPOSE"
+
+float rsiTdi = ta.rsi(src, rsiPeriod)
+int fastRespLen = math.max(2, int(math.round(fastLen * 0.62)))
+int slowRespLen = math.max(fastRespLen + 2, int(math.round(slowLen * 0.68)))
+int bandRespLen = math.max(5, int(math.round(bandLength * 0.70)))
+int plotRespLen = math.max(2, int(math.round(rsiPlotLen * 0.65)))
+
+float fastStable = f_ma(rsiTdi, fastLen, maType)
+float slowStable = f_ma(rsiTdi, slowLen, maType)
+float basisStable = f_ma(rsiTdi, bandLength, maType)
+float plotStable = f_ma(rsiTdi, rsiPlotLen, plotType)
+float offStable = bandMult * ta.stdev(rsiTdi, bandLength)
+float upperStable = basisStable + offStable
+float lowerStable = basisStable - offStable
+float widthStable = upperStable - lowerStable
+
+float fastResp = f_ma(rsiTdi, fastRespLen, maType)
+float slowResp = f_ma(rsiTdi, slowRespLen, maType)
+float basisResp = f_ma(rsiTdi, bandRespLen, maType)
+float plotResp = f_ma(rsiTdi, plotRespLen, plotType)
+float offResp = bandMult * ta.stdev(rsiTdi, bandRespLen)
+
+float stableVolRank = nz(ta.percentrank(widthStable, adaptLookback), 50.0)
+float stableEnergy = fastStable - slowStable
+float stableEnergyRank = nz(ta.percentrank(math.abs(stableEnergy), adaptLookback), 50.0)
+float rsiTravel = ta.sma(math.abs(ta.change(rsiTdi)), efficiencyLen) * efficiencyLen
+float erRaw = rsiTravel > 0 and not na(rsiTdi[efficiencyLen]) ? math.abs(rsiTdi - rsiTdi[efficiencyLen]) / rsiTravel : 0.0
+float efficiency = f_clamp(nz(erRaw, 0.0), 0.0, 1.0)
+float tfMin = timeframe.isticks ? 1.0 : timeframe.in_seconds() / 60.0
+float profileFactor = adaptiveProfile == "Scalp 1m" ? 0.72 : adaptiveProfile == "Scalp 3–5m" ? 0.95 : adaptiveProfile == "Balanced" ? 0.86 : adaptiveProfile == "Smooth" ? 0.60 : tfMin <= 1.0 ? 0.72 : tfMin <= 5.0 ? 0.95 : tfMin <= 15.0 ? 1.00 : tfMin <= 60.0 ? 0.90 : tfMin <= 240.0 ? 0.78 : 0.68
+string profileName = adaptiveProfile != "Auto" ? adaptiveProfile : tfMin <= 1.0 ? "AUTO 1m" : tfMin <= 5.0 ? "AUTO 3–5m" : tfMin <= 15.0 ? "AUTO 7–15m" : tfMin <= 60.0 ? "AUTO 30–60m" : "AUTO HTF"
+bool preSqueeze = stableVolRank <= squeezeRankMax
+float responseRaw = 0.12 + 0.43 * efficiency + 0.25 * (stableEnergyRank / 100.0) + 0.20 * (stableVolRank / 100.0)
+float neutralPenalty = math.abs(fastStable - 50.0) <= 6.0 and efficiency < 0.30 ? 0.15 : 0.0
+float squeezeFactor = preSqueeze ? 0.68 : 1.0
+float response = adaptiveOn ? f_clamp((responseRaw - neutralPenalty) * profileFactor * squeezeFactor, 0.04, maxResponse) : 0.0
+float bandResponse = response * 0.62
+float fastMA = f_lerp(fastStable, fastResp, response)
+float slowMA = f_lerp(slowStable, slowResp, response * 0.78)
+float basis = f_lerp(basisStable, basisResp, bandResponse)
+float rsiPlot = f_lerp(plotStable, plotResp, response * 0.70)
+float off = f_lerp(offStable, offResp, bandResponse)
+float upper = basis + off
+float lower = basis - off
+float bandW = upper - lower
+
+float volRank = nz(ta.percentrank(bandW, adaptLookback), 50.0)
+float energy = fastMA - slowMA
+float energyRank = nz(ta.percentrank(math.abs(energy), adaptLookback), 50.0)
+float widthSafe = math.max(bandW, 0.000001)
+float energyNorm = f_clamp(100.0 * energy / widthSafe, -100.0, 100.0)
+float fastPos = f_clamp((fastMA - 50.0) * 2.0, -100.0, 100.0)
+float basisPos = f_clamp((basis - 50.0) * 2.0, -100.0, 100.0)
+float plotPos = f_clamp((rsiPlot - 50.0) * 2.0, -100.0, 100.0)
+float slopeNorm = f_clamp(100.0 * (basis - nz(basis[3], basis)) / widthSafe, -100.0, 100.0)
+float fusion = f_clamp(0.34 * energyNorm + 0.24 * fastPos + 0.16 * basisPos + 0.10 * plotPos + 0.16 * slopeNorm, -100.0, 100.0)
+int bullVotes = (fastMA >= slowMA ? 1 : 0) + (fastMA >= basis ? 1 : 0) + (basis >= 50.0 ? 1 : 0) + (rsiPlot >= 50.0 ? 1 : 0) + (basis >= nz(basis[1], basis) ? 1 : 0)
+float voteAgreement = math.abs((bullVotes / 5.0) * 200.0 - 100.0)
+float confidenceRaw = math.abs(fusion) * 0.55 + voteAgreement * 0.20 + efficiency * 100.0 * 0.15 + energyRank * 0.10
+bool squeeze = volRank <= squeezeRankMax
+bool energyExpanding = math.abs(energy) > nz(math.abs(energy[1]), math.abs(energy))
+bool centerChop = fastMA >= 45.0 and fastMA <= 55.0 and math.abs(energyNorm) < 13.0
+bool statisticalChop = efficiency < 0.28 and math.abs(fusion) < 38.0
+bool chop = not squeeze and (centerChop or statisticalChop)
+float confidencePenalty = squeeze ? 0.82 : chop ? 0.86 : 1.0
+float confidence = f_clamp(confidenceRaw * confidencePenalty, 0.0, 100.0)
+bool ob = fastMA >= 67.0
+bool os = fastMA <= 33.0
+bool exhaustionUp = ob and fusion > 0 and not energyExpanding and fusion < nz(fusion[1], fusion)
+bool exhaustionDn = os and fusion < 0 and not energyExpanding and fusion > nz(fusion[1], fusion)
+bool expansion = not squeeze and not chop and volRank >= 72.0 and confidence >= 58.0 and energyExpanding
+bool trend = not squeeze and not chop and not expansion and confidence >= 54.0 and math.abs(fusion) >= 38.0 and efficiency >= 0.24
+string regime = squeeze ? "SQUEEZE" : chop ? "CHOP" : exhaustionUp or exhaustionDn ? "EXHAUSTION" : expansion ? "EXPANSION" : trend ? "TREND" : "TRANSITION"
+
+float fusionPrev2 = nz(fusion[2], fusion)
+bool fusionRising = fusion >= fusionPrev2 + 5.0
+bool fusionFalling = fusion <= fusionPrev2 - 5.0
+string momentumState = "NEUTRAL"
+if trendState == 1
+    momentumState := fusion >= 35.0 ? "DRIVING" : fusion <= -35.0 ? "COUNTER" : fusion <= -10.0 ? (fusionRising ? "RECOVERING" : "PULLBACK") : fusionRising and fusion < 20.0 ? "RECOVERING" : "COOLING"
+else if trendState == -1
+    momentumState := fusion <= -35.0 ? "DRIVING" : fusion >= 35.0 ? "COUNTER" : fusion >= 10.0 ? (fusionFalling ? "RECOVERING" : "PULLBACK") : fusionFalling and fusion > -20.0 ? "RECOVERING" : "COOLING"
+else
+    momentumState := fusion >= 25.0 ? "BULL MOM" : fusion <= -25.0 ? "BEAR MOM" : "NEUTRAL"
+
+float tfQualityAdj = adaptiveProfile == "Scalp 1m" ? 7.0 : adaptiveProfile == "Scalp 3–5m" ? 3.0 : adaptiveProfile == "Smooth" ? -2.0 : adaptiveProfile == "Balanced" ? 0.0 : tfMin <= 1.0 ? 7.0 : tfMin <= 5.0 ? 3.0 : tfMin <= 15.0 ? 0.0 : -2.0
+float regimeQualityAdj = squeeze ? 9.0 : chop ? 7.0 : expansion ? -4.0 : trend ? -2.0 : 2.0
+float effectiveConfFloor = f_clamp(baseConfFloor + tfQualityAdj + regimeQualityAdj, 45.0, 82.0)
+float effectiveFusionFloor = f_clamp(baseFusionFloor + tfQualityAdj * 0.55 + regimeQualityAdj * 0.45, 28.0, 70.0)
+
+bool fastBull = fastMA >= slowMA
+bool fastXup = ta.crossover(fastMA, slowMA)
+bool fastXdn = ta.crossunder(fastMA, slowMA)
+bool fastBasisUp = ta.crossover(fastMA, basis)
+bool fastBasisDn = ta.crossunder(fastMA, basis)
+bool sharkUp = rsiPlot > upper
+bool sharkDn = rsiPlot < lower
+var int lastSharkUpBar = na
+var int lastSharkDownBar = na
+bool sharkRawUp = sharkUp and not sharkUp[1]
+bool sharkRawDn = sharkDn and not sharkDn[1]
+bool sharkEventUp = sharkRawUp and (na(lastSharkUpBar) or bar_index - lastSharkUpBar >= 5)
+bool sharkEventDn = sharkRawDn and (na(lastSharkDownBar) or bar_index - lastSharkDownBar >= 5)
+if sharkEventUp
+    lastSharkUpBar := bar_index
+if sharkEventDn
+    lastSharkDownBar := bar_index
+bool squeezeOn = squeeze and not squeeze[1]
+bool squeezeRelease = not squeeze and squeeze[1]
+bool inChop = fastMA >= 45.0 and fastMA <= 55.0
+bool inEntryUp = fastMA > 55.0 and fastMA < 67.0
+bool inEntryDn = fastMA < 45.0 and fastMA > 33.0
+bool inRevOB = fastMA >= 67.0 and fastMA < 80.0
+bool inRevOS = fastMA <= 33.0 and fastMA > 20.0
+bool inExtOB = fastMA >= 80.0
+bool inExtOS = fastMA <= 20.0
+bool longZoneOK = strictEntryZones ? fastMA > 55.0 : fastMA > 50.0
+bool shortZoneOK = strictEntryZones ? fastMA < 45.0 : fastMA < 50.0
+bool longReady = not squeeze and not chop and fastBull and longZoneOK and fusion >= effectiveFusionFloor and confidence >= effectiveConfFloor
+bool shortReady = not squeeze and not chop and not fastBull and shortZoneOK and fusion <= -effectiveFusionFloor and confidence >= effectiveConfFloor
+
+int qualityCooldown = tfMin <= 1.0 ? 10 : tfMin <= 5.0 ? 7 : tfMin <= 15.0 ? 5 : 4
+var int lastQualityLongBar = na
+var int lastQualityShortBar = na
+var bool qualityLongArmed = true
+var bool qualityShortArmed = true
+
+if fusion < effectiveFusionFloor * 0.72 or fastMA < 50.0
+    qualityLongArmed := true
+if fusion > -effectiveFusionFloor * 0.72 or fastMA > 50.0
+    qualityShortArmed := true
+
+bool qualityLongCooldownOK = na(lastQualityLongBar) or bar_index - lastQualityLongBar >= qualityCooldown
+bool qualityShortCooldownOK = na(lastQualityShortBar) or bar_index - lastQualityShortBar >= qualityCooldown
+bool qUp = longReady and qualityLongArmed and qualityLongCooldownOK
+bool qDn = shortReady and qualityShortArmed and qualityShortCooldownOK
+
+if qUp
+    lastQualityLongBar := bar_index
+    qualityLongArmed := false
+if qDn
+    lastQualityShortBar := bar_index
+    qualityShortArmed := false
+bool biasBull = fusion > 16.0 and fastBull and basis >= 50.0
+bool biasBear = fusion < -16.0 and not fastBull and basis < 50.0
+string actionName = squeeze ? "COIL" : chop ? "CHOP" : exhaustionUp ? "EXHAUST ↑" : exhaustionDn ? "EXHAUST ↓" : longReady ? "LONG" : shortReady ? "SHORT" : fusion >= 20.0 ? "WATCH ↑" : fusion <= -20.0 ? "WATCH ↓" : "WAIT"
+string zoneName = inExtOB ? "EXT OB" : inRevOB ? "OB" : inEntryUp ? "ENTRY ↑" : inChop ? "CHOP" : inEntryDn ? "ENTRY ↓" : inRevOS ? "OS" : "EXT OS"
+
+float htfDeveloping = request.security(syminfo.tickerid, htfTf, f_htfState(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+float htfConfirmed = request.security(syminfo.tickerid, htfTf, f_htfState()[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+float htfState = htfMode == "Confirmed" ? htfConfirmed : htfDeveloping
+string htfText = htfState > 0 ? "BULL" : htfState < 0 ? "BEAR" : "MIXED"
+var int lastReleaseUpBar = na
+var int lastReleaseDownBar = na
+bool squeezeReleaseUpRaw = squeezeRelease and fastBull and fusion >= 15.0 and energy > 0 and energyExpanding
+bool squeezeReleaseDnRaw = squeezeRelease and not fastBull and fusion <= -15.0 and energy < 0 and energyExpanding
+bool squeezeReleaseUp = squeezeReleaseUpRaw and (na(lastReleaseUpBar) or bar_index - lastReleaseUpBar >= 4)
+bool squeezeReleaseDn = squeezeReleaseDnRaw and (na(lastReleaseDownBar) or bar_index - lastReleaseDownBar >= 4)
+if squeezeReleaseUp
+    lastReleaseUpBar := bar_index
+if squeezeReleaseDn
+    lastReleaseDownBar := bar_index
+
+float atr14 = ta.atr(14)
+float oscPH = ta.pivothigh(rsiPlot, divPivotLen, divPivotLen)
+float oscPL = ta.pivotlow(rsiPlot, divPivotLen, divPivotLen)
+var float prevDivHighOsc = na
+var float prevDivHighPx = na
+var int prevDivHighBar = na
+var float prevDivLowOsc = na
+var float prevDivLowPx = na
+var int prevDivLowBar = na
+var int lastBearDivLabelBar = na
+var int lastBullDivLabelBar = na
+int minDivLabelSpacing = math.max(2 * divPivotLen, 8)
+bool bearDiv = false
+bool bullDiv = false
+
+if not na(oscPH)
+    float px = high[divPivotLen]
+    float atrAtPivot = nz(atr14[divPivotLen], atr14)
+    bool priceHigher = not na(prevDivHighPx) and px > prevDivHighPx
+    bool oscLower = not na(prevDivHighOsc) and oscPH <= prevDivHighOsc - divMinRsiDelta
+    bool enoughPrice = not na(prevDivHighPx) and math.abs(px - prevDivHighPx) >= atrAtPivot * divMinPriceAtr
+    bool zoneOK = not divExtremeFilter or oscPH >= 55.0
+    bearDiv := priceHigher and oscLower and enoughPrice and zoneOK
+    int bearPivotBar = bar_index[divPivotLen]
+    bool bearDivVisualOK = na(lastBearDivLabelBar) or bearPivotBar - lastBearDivLabelBar >= minDivLabelSpacing
+    if bearDiv and showDivergence and not na(prevDivHighBar) and bearDivVisualOK
+        line.new(prevDivHighBar, prevDivHighOsc, bearPivotBar, oscPH, xloc = xloc.bar_index, color = color.new(bear, 28), width = 1, style = line.style_dashed)
+        label.new(bearPivotBar, oscPH, "DIV ▼", style = label.style_label_down, color = color.new(bear, 30), textcolor = color.white, size = size.tiny)
+        lastBearDivLabelBar := bearPivotBar
+    prevDivHighOsc := oscPH
+    prevDivHighPx := px
+    prevDivHighBar := bar_index[divPivotLen]
+
+if not na(oscPL)
+    float px = low[divPivotLen]
+    float atrAtPivot = nz(atr14[divPivotLen], atr14)
+    bool priceLower = not na(prevDivLowPx) and px < prevDivLowPx
+    bool oscHigher = not na(prevDivLowOsc) and oscPL >= prevDivLowOsc + divMinRsiDelta
+    bool enoughPrice = not na(prevDivLowPx) and math.abs(px - prevDivLowPx) >= atrAtPivot * divMinPriceAtr
+    bool zoneOK = not divExtremeFilter or oscPL <= 45.0
+    bullDiv := priceLower and oscHigher and enoughPrice and zoneOK
+    int bullPivotBar = bar_index[divPivotLen]
+    bool bullDivVisualOK = na(lastBullDivLabelBar) or bullPivotBar - lastBullDivLabelBar >= minDivLabelSpacing
+    if bullDiv and showDivergence and not na(prevDivLowBar) and bullDivVisualOK
+        line.new(prevDivLowBar, prevDivLowOsc, bullPivotBar, oscPL, xloc = xloc.bar_index, color = color.new(bull, 28), width = 1, style = line.style_dashed)
+        label.new(bullPivotBar, oscPL, "DIV ▲", style = label.style_label_up, color = color.new(bull, 30), textcolor = color.white, size = size.tiny)
+        lastBullDivLabelBar := bullPivotBar
+    prevDivLowOsc := oscPL
+    prevDivLowPx := px
+    prevDivLowBar := bar_index[divPivotLen]
+
+color fusionColor = color.from_gradient(fusion, -100.0, 100.0, bear, bull)
+color fastColor = visualMode == "Clean" ? (fastBull ? bull : bear) : fusionColor
+color basisColor = basis >= nz(basis[1], basis) ? gold : color.from_gradient(slopeNorm, -40.0, 40.0, bear, gold)
+float regimeAuraBoost = expansion ? 10.0 : trend ? 5.0 : exhaustionUp or exhaustionDn ? 3.0 : 0.0
+int auraT1 = int(f_clamp(94.0 - confidence * 0.16 - regimeAuraBoost, 66.0, 94.0))
+int auraT2 = int(f_clamp(86.0 - confidence * 0.12 - regimeAuraBoost * 0.75, 58.0, 86.0))
+int energyT = int(f_clamp(94.0 - confidence * 0.08 - math.abs(energyNorm) * 0.10, 70.0, 94.0))
+int fieldT = int(f_clamp(97.0 - confidence * 0.11, 82.0, 97.0))
+int bandT = int(f_clamp(96.0 - volRank * 0.055, 89.0, 96.0))
+color fieldColor = color.new(fusionColor, fieldT)
+if squeeze
+    fieldColor := color.new(gold, visualMode == "Research" ? 88 : 92)
+else if chop
+    fieldColor := color.new(#607D8B, visualMode == "Research" ? 91 : 96)
+else if expansion
+    fieldColor := color.new(fusionColor, int(f_clamp(fieldT - 10.0, 70.0, 90.0)))
+else if exhaustionUp or exhaustionDn
+    fieldColor := color.new(#E040FB, visualMode == "Research" ? 82 : 88)
+else if trend
+    fieldColor := color.new(fusionColor, int(f_clamp(fieldT - 3.0, 76.0, 94.0)))
+else
+    fieldColor := color.new(fusionColor, int(f_clamp(fieldT + 2.0, 86.0, 98.0)))
+color energyColor = fastBull ? color.new(bull, energyT) : color.new(bear, energyT)
+bool auraActive = showAura and (visualMode == "Research" or confidence >= 30.0)
+bool fieldActive = showField and (visualMode == "Research" or visualMode == "Spectrum" or squeeze)
+bgcolor(fieldActive ? fieldColor : na, title = "Adaptive regime field")
+
+h0 = hline(0, "0", color = color.new(#B71C1C, 100))
+h20 = hline(20, "20", color = color.new(#B71C1C, 35), linestyle = hline.style_dotted)
+h33 = hline(33, "33", color = color.new(#FF1744, 20), linestyle = hline.style_dashed)
+h45 = hline(45, "45", color = color.new(#90A4AE, 25), linestyle = hline.style_dashed)
+h50 = hline(50, "50", color = color.new(#90A4AE, 70), linestyle = hline.style_dotted)
+h55 = hline(55, "55", color = color.new(#00C853, 25), linestyle = hline.style_dashed)
+h67 = hline(67, "67", color = color.new(#E91E63, 20), linestyle = hline.style_dashed)
+h80 = hline(80, "80", color = color.new(#AD1457, 35), linestyle = hline.style_dotted)
+h100 = hline(100, "100", color = color.new(#AD1457, 100))
+fill(h80, h100, color = showZones ? color.new(#AD1457, 91) : na, title = "Zone EXT OB")
+fill(h67, h80, color = showZones ? color.new(#E91E63, 93) : na, title = "Zone OB")
+fill(h55, h67, color = showZones ? color.new(#00C853, 95) : na, title = "Zone LONG")
+fill(h45, h55, color = showZones ? color.new(#607D8B, 93) : na, title = "Zone CHOP")
+fill(h33, h45, color = showZones ? color.new(#FF6D00, 95) : na, title = "Zone SHORT")
+fill(h20, h33, color = showZones ? color.new(#FF1744, 93) : na, title = "Zone OS")
+fill(h0, h20, color = showZones ? color.new(#B71C1C, 91) : na, title = "Zone EXT OS")
+
+pUpper = plot(upper, "Upper Band", color = color.new(accent, 48), linewidth = 1)
+pLower = plot(lower, "Lower Band", color = color.new(accent, 48), linewidth = 1)
+pBasis = plot(basis, "Band Equilibrium", color = basisColor, linewidth = 2)
+pSlow = plot(slowMA, "Slow MA", color = color.new(gold, 28), linewidth = 2)
+fill(pUpper, pBasis, color = showFills ? color.new(accent, bandT) : na, title = "Upper spectral fill")
+fill(pBasis, pLower, color = showFills ? color.new(bull, bandT) : na, title = "Lower spectral fill")
+plot(auraActive ? fastMA : na, "Fast Aura Wide", color = color.new(fastColor, auraT1), linewidth = 7)
+plot(auraActive ? fastMA : na, "Fast Aura Core", color = color.new(fastColor, auraT2), linewidth = 4)
+pFast = plot(fastMA, "Fast MA", color = fastColor, linewidth = 2)
+fill(pFast, pSlow, color = showEnergy ? energyColor : na, title = "Adaptive Energy Field")
+plot(showRsiPlot ? rsiPlot : na, "Purple Plot", color = color.new(accent, visualMode == "Research" ? 4 : visualMode == "Spectrum" ? 12 : 28), linewidth = visualMode == "Research" ? 2 : 1)
+
+plotshape(showSqueeze and squeezeOn ? basis : na, title = "Squeeze On", style = shape.diamond, location = location.absolute, color = color.new(gold, 0), size = size.tiny)
+plotshape(showSqueeze and squeezeRelease and not showQualifiedRelease ? basis : na, title = "Squeeze Release", style = shape.circle, location = location.absolute, color = color.new(accent, 0), size = size.tiny)
+plotshape(showSqueeze and showQualifiedRelease and squeezeReleaseUp ? fastMA : na, title = "Qualified Release Up", style = shape.triangleup, location = location.absolute, color = color.new(bull, 0), size = size.small)
+plotshape(showSqueeze and showQualifiedRelease and squeezeReleaseDn ? fastMA : na, title = "Qualified Release Down", style = shape.triangledown, location = location.absolute, color = color.new(bear, 0), size = size.small)
+plotshape(showShark and sharkEventUp ? rsiPlot : na, title = "Shark Up", style = shape.triangleup, location = location.absolute, color = color.new(accent, 0), size = size.tiny)
+plotshape(showShark and sharkEventDn ? rsiPlot : na, title = "Shark Down", style = shape.triangledown, location = location.absolute, color = color.new(accent, 0), size = size.tiny)
+plotshape(showQualityX and qUp ? fastMA : na, title = "Quality Long", style = shape.circle, location = location.absolute, color = bull, size = size.small)
+plotshape(showQualityX and qDn ? fastMA : na, title = "Quality Short", style = shape.circle, location = location.absolute, color = bear, size = size.small)
+plotshape(showCrossDots and fastXup ? fastMA : na, title = "Fast x Slow Up", style = shape.circle, location = location.absolute, color = color.new(bull, 25), size = size.tiny)
+plotshape(showCrossDots and fastXdn ? fastMA : na, title = "Fast x Slow Down", style = shape.circle, location = location.absolute, color = color.new(bear, 25), size = size.tiny)
+
+string dashPosition = dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : dashPos == "Bottom left" ? position.bottom_left : position.top_right
+string dashTextSize = dashSize == "Tiny" ? size.tiny : size.small
+int hudCellAlpha = int(f_clamp(dashAlpha - 34.0, 0.0, 92.0))
+f_cellBg(float signedValue, float strength) =>
+    color c = color.from_gradient(signedValue, -100.0, 100.0, bear, bull)
+    int a = int(f_clamp(hudCellAlpha + 18.0 - strength * 0.20, 8.0, 92.0))
+    color.new(c, a)
+f_gauge(float v) =>
+    int filled = int(math.round(f_clamp((v + 100.0) / 20.0, 0.0, 10.0)))
+    string out = ""
+    for i = 0 to 9
+        out += i < filled ? "█" : "░"
+    out
+var table dash = table.new(dashPosition, 2, 12, bgcolor = color.new(dark, dashAlpha), border_width = 1, border_color = color.new(neutral, math.min(dashAlpha + 4, 100)), frame_color = color.new(accent, math.max(dashAlpha - 18, 0)), frame_width = 1)
+
+if showDash and barstate.islast
+    color regimeCol = regime == "SQUEEZE" ? color.new(gold, hudCellAlpha) : regime == "CHOP" ? color.new(neutral, hudCellAlpha) : regime == "EXPANSION" ? color.new(accent, hudCellAlpha) : regime == "EXHAUSTION" ? color.new(#E040FB, hudCellAlpha) : regime == "TREND" ? f_cellBg(trendCarrier, confidence) : color.new(#455A64, hudCellAlpha)
+    int actionAlpha = math.max(hudCellAlpha - 18, 4)
+    color actionCol = actionName == "LONG" ? color.new(bull, actionAlpha) : actionName == "SHORT" ? color.new(bear, actionAlpha) : actionName == "COIL" ? color.new(gold, actionAlpha) : actionName == "CHOP" ? color.new(neutral, actionAlpha) : exhaustionUp or exhaustionDn ? color.new(#E040FB, actionAlpha) : color.new(#455A64, hudCellAlpha)
+    string trendTxt = trendState > 0 ? "BULL " + str.tostring(trendCarrier, "#.0") : trendState < 0 ? "BEAR " + str.tostring(trendCarrier, "#.0") : "MIX " + str.tostring(trendCarrier, "#.0")
+    color trendCol = trendState > 0 ? color.new(bull, hudCellAlpha) : trendState < 0 ? color.new(bear, hudCellAlpha) : color.new(neutral, hudCellAlpha)
+    string momentumTxt = momentumState + " " + str.tostring(fusion, "#.0")
+    color momentumCol = f_cellBg(fusion, confidence)
+    string flowTxt = flowAvailable ? flowState + " " + str.tostring(flowScore, "#.0") : "N/A"
+    color flowCol = not flowAvailable ? color.new(neutral, hudCellAlpha) : flowState == "CONFIRM" ? trendCol : flowState == "OPPOSE" ? color.new(#FFAB40, hudCellAlpha) : color.new(neutral, hudCellAlpha)
+    color htfCol = htfState > 0 ? color.new(bull, hudCellAlpha) : htfState < 0 ? color.new(bear, hudCellAlpha) : color.new(neutral, hudCellAlpha)
+    color confCol = f_cellBg(trendCarrier, confidence)
+    color engineCol = color.new(accent, math.min(hudCellAlpha + 10, 96))
+    color zoneCol = inChop ? color.new(neutral, math.min(hudCellAlpha + 8, 96)) : inEntryUp ? color.new(bull, math.min(hudCellAlpha + 8, 96)) : inEntryDn ? color.new(bear, math.min(hudCellAlpha + 8, 96)) : color.new(#E040FB, math.min(hudCellAlpha + 8, 96))
+    string engineTxt = profileName + " " + str.tostring(response * 100.0, "#.0") + "%"
+    string volTxt = str.tostring(volRank, "#.0") + "% / " + str.tostring(efficiency, "#.00")
+    string thresholdTxt = str.tostring(effectiveConfFloor, "#") + "/" + str.tostring(effectiveFusionFloor, "#")
+    string htfModeTag = htfMode == "Confirmed" ? " C" : " D"
+    string stateBase = squeeze ? "COIL" : energyExpanding ? "BUILD" : "COOL"
+    string stateTxt = dashMode == "Diagnostic" ? stateBase + " • Q " + thresholdTxt : stateBase
+    table.cell(dash, 0, 0, "∞ TDI E", text_color = color.new(accent, 0), text_size = dashTextSize)
+    table.cell(dash, 1, 0, trendTxt, bgcolor = trendCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 1, "ACTION", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 1, actionName, bgcolor = actionCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 2, "REGIME", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 2, regime, bgcolor = regimeCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 3, "TREND", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 3, trendTxt, bgcolor = trendCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 4, "MOMENTUM", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 4, momentumTxt, bgcolor = momentumCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 5, "FLOW", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 5, flowTxt, bgcolor = flowCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 6, "CONF", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 6, str.tostring(confidence, "#.0") + "%", bgcolor = confCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 7, "VOL / EFF", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 7, volTxt, bgcolor = squeeze ? color.new(gold, hudCellAlpha) : color.new(#263238, hudCellAlpha), text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 8, "ENGINE", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 8, engineTxt, bgcolor = engineCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 9, "HTF " + htfTf, text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 9, htfText + htfModeTag, bgcolor = htfCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 10, "ZONE", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 10, zoneName, bgcolor = zoneCol, text_color = color.white, text_size = dashTextSize)
+    table.cell(dash, 0, 11, "STATE", text_color = color.new(neutral, 4), text_size = dashTextSize)
+    table.cell(dash, 1, 11, stateTxt, bgcolor = color.new(#455A64, hudCellAlpha), text_color = color.white, text_size = dashTextSize)
+else if not showDash
+    table.clear(dash, 0, 0, 1, 11)
+
+// 1e semantic bridge bus. Eight semantic channels are quantized and packed
+// into one exact integer-valued float below Pine's 2^53 exact-integer boundary.
+const float TDI_E_BUS_MAGIC = 1873000000000000.0
+float eTrendQ = math.round(f_clamp(trendCarrier, -100.0, 100.0) * 10.0 + 1000.0)
+float eTrendStateQ = trendState + 1.0
+float eMomentumQ = math.round(f_clamp(fusion, -100.0, 100.0) * 10.0 + 1000.0)
+float eFlowQ = flowAvailable ? math.round(f_clamp(flowScore, -100.0, 100.0) * 10.0 + 1000.0) : 2001.0
+float eConfidenceQ = math.round(f_clamp(confidence, 0.0, 100.0) * 10.0)
+float eRegimeQ = regime == "SQUEEZE" ? 0.0 : regime == "CHOP" ? 1.0 : regime == "EXHAUSTION" ? 2.0 : regime == "EXPANSION" ? 3.0 : regime == "TREND" ? 4.0 : 5.0
+float eReadyQ = longReady ? 2.0 : shortReady ? 0.0 : 1.0
+float eSignalQ = qUp ? 2.0 : qDn ? 0.0 : 1.0
+float ePayload = eTrendQ
+ePayload := ePayload + eTrendStateQ * 2001.0
+ePayload := ePayload + eMomentumQ * 6003.0
+ePayload := ePayload + eFlowQ * 12012003.0
+ePayload := ePayload + eConfidenceQ * 24048030006.0
+ePayload := ePayload + eRegimeQ * 24072078036006.0
+ePayload := ePayload + eReadyQ * 144432468216036.0
+ePayload := ePayload + eSignalQ * 433297404648108.0
+float bridgeBus = TDI_E_BUS_MAGIC + ePayload
+plot(bridgeBus, "TDI Bridge Bus", display = display.none)
+
+alertcondition(qUp, "Adaptive quality long", "TDI Infinity: adaptive LONG quality gate opened")
+alertcondition(qDn, "Adaptive quality short", "TDI Infinity: adaptive SHORT quality gate opened")
+alertcondition(squeezeReleaseUp, "Qualified squeeze release up", "TDI Infinity: qualified bullish squeeze release")
+alertcondition(squeezeReleaseDn, "Qualified squeeze release down", "TDI Infinity: qualified bearish squeeze release")
+alertcondition(bullDiv, "Qualified bullish divergence", "TDI Infinity: qualified bullish divergence confirmed")
+alertcondition(bearDiv, "Qualified bearish divergence", "TDI Infinity: qualified bearish divergence confirmed")
+alertcondition(ta.crossover(fusion, effectiveFusionFloor), "Fusion bull threshold", "TDI Infinity: bullish fusion threshold crossed")
+alertcondition(ta.crossunder(fusion, -effectiveFusionFloor), "Fusion bear threshold", "TDI Infinity: bearish fusion threshold crossed")
