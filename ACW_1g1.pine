@@ -1,0 +1,1588 @@
+//@version=6
+indicator(
+    title = "ACW ∞ Spectral Fusion PRO 1g1",
+    shorttitle = "ACW ∞ 1g1",
+    overlay = true,
+    precision = 2,
+    max_lines_count = 500,
+    max_labels_count = 300,
+    max_bars_back = 5000)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACW ∞ SPECTRAL FUSION PRO 1g1
+//
+// Parser-safe mobile edition + stronger default visuals per user feedback.
+// Architecture:
+//   1. Adaptive MAMA/FAMA engine
+//   2. MACD 8-vote momentum council
+//   3. HH/HL/LH/LL structural swing engine
+//   4. Fusion score -100 ... +100
+//   5. Quality + market regime classifier
+//   6. Spectral visualization / glow / adaptive heat
+//   7. Fusion dashboard + alerts
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  0. MASTER / THEME                                                    ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MASTER = "00 • ACW ∞ Master"
+
+string theme = input.string(
+    "Aurora Neon",
+    "Visual Theme",
+    options = ["Aurora Neon", "Ocean Deep", "Royal Gold", "Crimson Ice"],
+    group = GRP_MASTER)
+
+bool autoProfile = input.bool(
+    true,
+    "Automatic timeframe profile",
+    group = GRP_MASTER,
+    tooltip = "Automatically selects MACD and swing responsiveness for the current chart timeframe.")
+
+bool autoAdapt = input.bool(
+    true,
+    "Adaptive MAMA intelligence",
+    group = GRP_MASTER,
+    tooltip = "Blends efficiency ratio and volatility rank into MAMA/FAMA responsiveness.")
+
+bool showDashboard = input.bool(true, "Fusion Dashboard", group = GRP_MASTER)
+bool showSignals = input.bool(true, "Fusion impulse signals", group = GRP_MASTER)
+bool confirmedOnly = input.bool(true, "Signals on confirmed bars only", group = GRP_MASTER)
+string signalPersonality = input.string("Balanced", "Signal Personality", options = ["Selective", "Balanced", "Active"], group = GRP_MASTER,
+ tooltip = "G promotion profile only: Selective demands cleaner evidence, Balanced preserves F1.3 behavior, Active promotes eligible WATCH states earlier. Hard risk semantics remain authoritative.")
+
+const string GRP_LIFECYCLE = "08 • G Signal Lifecycle"
+bool showLifecycleEntries = input.bool(true, "Show Entry Marks", group = GRP_LIFECYCLE)
+bool showLifecycleCaution = input.bool(false, "Show Caution Marks", group = GRP_LIFECYCLE)
+bool showLifecycleExit = input.bool(true, "Show Exit Marks", group = GRP_LIFECYCLE)
+bool showLifecycleInvalidation = input.bool(true, "Show Invalidation Marks", group = GRP_LIFECYCLE)
+bool showSignalAge = input.bool(true, "Show Signal Age in HUD", group = GRP_LIFECYCLE)
+bool showCompletedTradeConnectors = input.bool(true, "Show Completed Trade Connectors", group = GRP_LIFECYCLE, tooltip = "Draws a thin dotted line from the confirmed A entry price to the confirmed X/INV exit price.")
+bool showActiveTradeConnector = input.bool(false, "Show Active Trade Connector", group = GRP_LIFECYCLE, tooltip = "Optionally previews the current lifecycle path from entry price to live price. Completed connectors remain governed by the separate toggle.")
+color gLongMarkColor = #00695C
+color gShortMarkColor = #A61E4D
+color gNeutralMarkColor = #37474F
+color gInvalidMarkColor = #7A1F3D
+
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_sign(float x) =>
+    x > 0.0 ? 1 : x < 0.0 ? -1 : 0
+
+f_signedPct(float x) =>
+    na(x) ? "N/A" : (x > 0.0 ? "+" : "") + str.tostring(x, "#.##") + "%"
+
+f_vote(bool condition) =>
+    condition ? 1 : -1
+
+// G promotion overlay. It may only alter READY/WATCH promotion; it never rewrites market state.
+f_applyPersonality(string incoming, string personality, float quality, float confluenceAbs, bool maSupports, bool structureCompatible, bool momentumCounter, bool bothContextsOppose, bool directionConflictNow, bool squeezeBlock, bool strongExhaustion, bool freshOpposingDiv, bool corroboratedFreshOpposingDiv, bool flowOpposes, float flowMagnitude, bool anchorOpposes) =>
+    string out = incoming
+    if personality == "Selective" and incoming == "READY"
+        bool keepReady = quality >= 60.0 and confluenceAbs >= 60.0 and not strongExhaustion and not freshOpposingDiv and not flowOpposes and not anchorOpposes and not directionConflictNow and not momentumCounter
+        out := keepReady ? "READY" : "WATCH"
+    else if personality == "Active" and incoming == "WATCH"
+        float activeFloor = flowOpposes and flowMagnitude >= 35.0 ? 55.0 : 50.0
+        bool promote = quality >= activeFloor and confluenceAbs >= activeFloor and maSupports and structureCompatible and not momentumCounter and not bothContextsOppose and not directionConflictNow and not squeezeBlock and not strongExhaustion and not corroboratedFreshOpposingDiv
+        out := promote ? "READY" : "WATCH"
+    out
+
+// G lifecycle helpers are pure: lifecycle persistence stays in global scope.
+f_deteriorationVotes(int activeDir, bool flowAvailableNow, float flowValue, int anchorStateNow, string momentumStateNow, string maPhaseNow, string structureFreshnessNow, bool reversalPressureNow) =>
+    int votes = 0
+    if flowAvailableNow and math.abs(flowValue) >= 15.0 and flowValue * activeDir < 0.0
+        votes += 1
+    if anchorStateNow == -activeDir
+        votes += 1
+    if momentumStateNow == "COUNTER"
+        votes += 1
+    if (maPhaseNow == "CONTRACT" or maPhaseNow == "COMPRESS") and structureFreshnessNow != "FRESH"
+        votes += 1
+    if reversalPressureNow
+        votes += 1
+    votes
+
+f_invalidated(int activeDir, bool oppositeReady, int maDirNow, int structureDirNow, int tdiTrendNow) =>
+    int oppositeDir = -activeDir
+    int authorityFlips = (maDirNow == oppositeDir ? 1 : 0) + (structureDirNow == oppositeDir ? 1 : 0) + (tdiTrendNow == oppositeDir ? 1 : 0)
+    authorityFlips >= 2 or (oppositeReady and authorityFlips >= 1)
+
+f_cautionReason(int activeDir, bool exhaustionSameDir, bool strongExhaustion, bool freshOpposingDiv, bool flowAvailableNow, float flowValue, int anchorStateNow, string momentumStateNow, string maPhaseNow) =>
+    string reason = "NONE"
+    if exhaustionSameDir and not strongExhaustion
+        reason := "TREND TIRED"
+    else if freshOpposingDiv
+        reason := "DIVERGENCE FRESH"
+    else if flowAvailableNow and math.abs(flowValue) >= 15.0 and flowValue * activeDir < 0.0
+        reason := "FLOW OPPOSES"
+    else if anchorStateNow == -activeDir
+        reason := "ANCHOR OPPOSES"
+    else if (momentumStateNow == "COOLING" or momentumStateNow == "PULLBACK") and (maPhaseNow == "CONTRACT" or maPhaseNow == "COMPRESS")
+        reason := "MOMENTUM COOLING"
+    reason
+
+// F1.3 display-only mirror of TDI's automatic Near/Anchor ladder.
+// It adds readable timeframe names to ACW Descriptive HUD without changing bridge transport.
+f_autoNear(float sec) =>
+    string tf = "3"
+    if sec <= 60.0
+        tf := "3"
+    else if sec <= 180.0
+        tf := "7"
+    else if sec <= 420.0
+        tf := "15"
+    else if sec <= 900.0
+        tf := "45"
+    else if sec <= 3600.0
+        tf := "120"
+    else if sec <= 7200.0
+        tf := "360"
+    else if sec <= 21600.0
+        tf := "D"
+    else if sec <= 86400.0
+        tf := "3D"
+    else if sec <= 259200.0
+        tf := "W"
+    else if sec <= 604800.0
+        tf := "M"
+    else if sec <= 2592000.0
+        tf := "3M"
+    else
+        tf := "6M"
+    tf
+
+f_autoAnchor(float sec) =>
+    string tf = "15"
+    if sec <= 60.0
+        tf := "15"
+    else if sec <= 180.0
+        tf := "45"
+    else if sec <= 420.0
+        tf := "45"
+    else if sec <= 900.0
+        tf := "120"
+    else if sec <= 3600.0
+        tf := "360"
+    else if sec <= 7200.0
+        tf := "D"
+    else if sec <= 21600.0
+        tf := "3D"
+    else if sec <= 86400.0
+        tf := "W"
+    else if sec <= 259200.0
+        tf := "M"
+    else if sec <= 604800.0
+        tf := "3M"
+    else if sec <= 2592000.0
+        tf := "6M"
+    else
+        tf := "12M"
+    tf
+
+f_tfLabel(string tf) =>
+    switch tf
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "7" => "7m"
+        "15" => "15m"
+        "30" => "30m"
+        "45" => "45m"
+        "60" => "1h"
+        "120" => "2h"
+        "240" => "4h"
+        "360" => "6h"
+        "D" => "1D"
+        "3D" => "3D"
+        "W" => "1W"
+        "M" => "1M"
+        "3M" => "3M"
+        "6M" => "6M"
+        "12M" => "12M"
+        => tf
+
+color bullBase = switch theme
+    "Aurora Neon" => #00E5FF
+    "Ocean Deep"  => #00B8D4
+    "Royal Gold"  => #FFD740
+    => #64FFDA
+
+color bullHot = switch theme
+    "Aurora Neon" => #00FFB8
+    "Ocean Deep"  => #00E5FF
+    "Royal Gold"  => #FFAB00
+    => #00E676
+
+color bearBase = switch theme
+    "Aurora Neon" => #FF3D71
+    "Ocean Deep"  => #7C4DFF
+    "Royal Gold"  => #FF5252
+    => #FF1744
+
+color bearHot = switch theme
+    "Aurora Neon" => #FF1744
+    "Ocean Deep"  => #D500F9
+    "Royal Gold"  => #D50000
+    => #FF4081
+
+color neutralBase = theme == "Royal Gold" ? #8D7B57 : #546E7A
+color darkBase = theme == "Ocean Deep" ? #07141E : theme == "Royal Gold" ? #17130B : #0B1118
+
+f_scoreColor(float score, int transparency) =>
+    color result = color.new(neutralBase, transparency)
+    if score >= 0.0
+        result := color.from_gradient(
+            score,
+            0.0,
+            100.0,
+            color.new(neutralBase, transparency),
+            color.new(bullHot, transparency))
+    else
+        result := color.from_gradient(
+            score,
+            -100.0,
+            0.0,
+            color.new(bearHot, transparency),
+            color.new(neutralBase, transparency))
+    result
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  1. ADAPTIVE CONTEXT ENGINE                                           ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_ADAPT = "01 • Adaptive Intelligence"
+
+int erLength = input.int(20, "Efficiency Ratio Length", minval = 5, maxval = 100, group = GRP_ADAPT)
+int volLookback = input.int(100, "Volatility Rank Lookback", minval = 20, maxval = 500, group = GRP_ADAPT)
+int atrLength = input.int(14, "ATR Length", minval = 2, group = GRP_ADAPT)
+
+float atr = ta.atr(atrLength)
+float safePrice = math.max(math.abs(close), syminfo.mintick)
+float volNorm = atr / safePrice * 100.0
+float volRankRaw = ta.percentrank(volNorm, volLookback)
+float volRank = nz(volRankRaw, 50.0)
+
+float priceStep = math.abs(ta.change(close))
+float erDen = ta.sma(priceStep, erLength) * erLength
+float efficiency = not na(erDen) and erDen > 0.0 ? f_clamp(math.abs(close - close[erLength]) / erDen, 0.0, 1.0) : 0.0
+float adaptiveDrive = f_clamp(0.58 * efficiency + 0.42 * (volRank / 100.0), 0.0, 1.0)
+
+bool intraday = timeframe.isintraday
+int tfMult = timeframe.multiplier
+
+string profileName = "SWING"
+if not autoProfile
+    profileName := "MANUAL"
+else if not intraday
+    profileName := "HTF"
+else if tfMult <= 1
+    profileName := "SCALP 1m"
+else if tfMult <= 5
+    profileName := "SCALP 3–5m"
+else if tfMult <= 15
+    profileName := "INTRADAY"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  2. MAMA / FAMA — ADAPTIVE EHLERS ENGINE                              ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MAMA = "02 • MAMA / FAMA"
+
+float mamaSrc = input.source(close, "Source", group = GRP_MAMA)
+float fastLimitInput = input.float(0.20, "Fast Limit", minval = 0.01, maxval = 0.90, step = 0.01, group = GRP_MAMA)
+float slowLimitInput = input.float(0.05, "Slow Limit", minval = 0.005, maxval = 0.50, step = 0.005, group = GRP_MAMA)
+bool showMama = input.bool(true, "Show MAMA / FAMA", group = GRP_MAMA)
+bool mamaGlow = input.bool(true, "Spectral glow", group = GRP_MAMA)
+bool fillMama = input.bool(true, "Energy fill", group = GRP_MAMA)
+int mamaWidth = input.int(2, "Core width", minval = 1, maxval = 4, group = GRP_MAMA)
+bool markMamaCross = input.bool(false, "Mark MAMA/FAMA crosses", group = GRP_MAMA)
+
+float tfResponse = 0.88
+if not autoProfile
+    tfResponse := 1.0
+else if not intraday
+    tfResponse := 0.82
+else if tfMult <= 1
+    tfResponse := 1.15
+else if tfMult <= 5
+    tfResponse := 1.06
+else if tfMult <= 15
+    tfResponse := 0.96
+
+float fastBase = math.max(fastLimitInput, slowLimitInput)
+float slowBase = math.min(slowLimitInput, fastBase)
+float fastLimit = autoAdapt ? f_clamp(fastBase * tfResponse * (0.84 + 0.34 * adaptiveDrive), 0.02, 0.60) : fastBase
+float slowLimit = autoAdapt ? f_clamp(slowBase * (0.88 + 0.24 * adaptiveDrive), 0.005, fastLimit * 0.80) : slowBase
+
+float p = 0.0
+float i2 = 0.0
+float q2 = 0.0
+float re = 0.0
+float im = 0.0
+float spp = 0.0
+float mama = 0.0
+float fama = 0.0
+
+float sp = (4.0 * mamaSrc + 3.0 * mamaSrc[1] + 2.0 * mamaSrc[2] + mamaSrc[3]) / 10.0
+float dt = (0.0962 * sp + 0.5769 * nz(sp[2]) - 0.5769 * nz(sp[4]) - 0.0962 * nz(sp[6])) * (0.075 * nz(p[1]) + 0.54)
+float q1 = (0.0962 * dt + 0.5769 * nz(dt[2]) - 0.5769 * nz(dt[4]) - 0.0962 * nz(dt[6])) * (0.075 * nz(p[1]) + 0.54)
+float i1 = nz(dt[3])
+float jI = (0.0962 * i1 + 0.5769 * nz(i1[2]) - 0.5769 * nz(i1[4]) - 0.0962 * nz(i1[6])) * (0.075 * nz(p[1]) + 0.54)
+float jq = (0.0962 * q1 + 0.5769 * nz(q1[2]) - 0.5769 * nz(q1[4]) - 0.0962 * nz(q1[6])) * (0.075 * nz(p[1]) + 0.54)
+float i2Raw = i1 - jq
+float q2Raw = q1 + jI
+
+i2 := 0.20 * i2Raw + 0.80 * nz(i2[1])
+q2 := 0.20 * q2Raw + 0.80 * nz(q2[1])
+
+float reRaw = i2 * nz(i2[1]) + q2 * nz(q2[1])
+float imRaw = i2 * nz(q2[1]) - q2 * nz(i2[1])
+re := 0.20 * reRaw + 0.80 * nz(re[1])
+im := 0.20 * imRaw + 0.80 * nz(im[1])
+
+float p1 = im != 0.0 and re != 0.0 ? 2.0 * math.pi / math.atan(im / re) : nz(p[1], 10.0)
+float previousP1 = nz(p1[1], p1)
+float p2 = p1 > 1.50 * previousP1 ? 1.50 * previousP1 : p1 < 0.67 * previousP1 ? 0.67 * previousP1 : p1
+float p3 = p2 < 6.0 ? 6.0 : p2 > 50.0 ? 50.0 : p2
+p := 0.20 * p3 + 0.80 * nz(p3[1], p3)
+spp := 0.33 * p + 0.67 * nz(spp[1], p)
+
+float phase = i1 != 0.0 ? 180.0 / math.pi * math.atan(q1 / i1) : 0.0
+float dPhaseRaw = nz(phase[1], phase) - phase
+float dPhase = math.max(dPhaseRaw, 1.0)
+float alphaRaw = fastLimit / dPhase
+float alpha = f_clamp(alphaRaw, slowLimit, fastLimit)
+
+mama := alpha * mamaSrc + (1.0 - alpha) * nz(mama[1], mamaSrc)
+fama := 0.50 * alpha * mama + (1.0 - 0.50 * alpha) * nz(fama[1], mama)
+
+float safeAtr = math.max(atr, syminfo.mintick)
+float mamaSpreadScore = f_clamp((mama - fama) / (safeAtr * 0.35) * 100.0, -100.0, 100.0)
+float mamaSlopeScore = f_clamp((mama - nz(mama[1], mama)) / (safeAtr * 0.08) * 100.0, -100.0, 100.0)
+float mamaScore = f_clamp(0.76 * mamaSpreadScore + 0.24 * mamaSlopeScore, -100.0, 100.0)
+color mamaColor = f_scoreColor(mamaScore, 0)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  3. MACD MOMENTUM COUNCIL                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_MACD = "03 • MACD Momentum Council"
+
+float macdSrc = input.source(close, "Price data", group = GRP_MACD)
+int manualFast = input.int(12, "Manual Fast EMA", minval = 1, group = GRP_MACD)
+int manualSlow = input.int(26, "Manual Slow EMA", minval = 2, group = GRP_MACD)
+int manualSignal = input.int(9, "Manual Signal", minval = 1, group = GRP_MACD)
+bool showMacdMA = input.bool(true, "Show MACD EMA structure", group = GRP_MACD)
+bool emaGlow = input.bool(true, "EMA glow", group = GRP_MACD)
+bool showHeat = input.bool(true, "Spectral background heat", group = GRP_MACD)
+string heatSource = input.string("ACW + TDI Confluence", "Heat Source", options = ["ACW Fusion", "MACD Council", "TDI Fusion", "ACW + TDI Confluence"], group = GRP_MACD)
+int heatTransparency = input.int(84, "Base heat transparency", minval = 70, maxval = 96, group = GRP_MACD)
+float minHeatStrength = input.float(0.58, "Minimum visible heat strength", minval = 0.20, maxval = 1.0, step = 0.05, group = GRP_MACD)
+
+int macdFast = 16
+int macdSlow = 34
+int macdSig = 9
+
+if not autoProfile
+    macdFast := manualFast
+    macdSlow := manualSlow
+    macdSig := manualSignal
+else if intraday
+    if tfMult <= 1
+        macdFast := 8
+        macdSlow := 21
+        macdSig := 5
+    else if tfMult <= 5
+        macdFast := 10
+        macdSlow := 24
+        macdSig := 7
+    else if tfMult <= 15
+        macdFast := 12
+        macdSlow := 26
+        macdSig := 9
+
+float fastMA = ta.ema(macdSrc, macdFast)
+float slowMA = ta.ema(macdSrc, macdSlow)
+float macdLine = fastMA - slowMA
+float macdSignal = ta.ema(macdLine, macdSig)
+float macdHist = macdLine - macdSignal
+
+int vote1 = f_vote(fastMA > slowMA)
+int vote2 = f_vote(ta.change(fastMA) > 0.0)
+int vote3 = f_vote(ta.change(slowMA) > 0.0)
+int vote4 = f_vote(ta.change(macdLine) > 0.0)
+int vote5 = f_vote(macdLine > macdSignal)
+int vote6 = f_vote(ta.change(macdHist) > 0.0)
+int vote7 = f_vote(macdSignal > 0.0)
+int vote8 = f_vote(ta.change(macdSignal) > 0.0)
+
+int macdVotes = vote1 + vote2 + vote3 + vote4 + vote5 + vote6 + vote7 + vote8
+float macdScore = f_clamp(macdVotes * 12.5, -100.0, 100.0)
+color macdColor = f_scoreColor(macdScore, 0)
+
+// F MA Core: explicit ribbon geometry from existing MAMA/FAMA + EMA structure.
+float fastMASlope = ta.change(fastMA)
+float slowMASlope = ta.change(slowMA)
+int mamaDir = f_sign(mama - fama)
+int emaDir = f_sign(fastMA - slowMA)
+float emaSepScore = f_clamp((fastMA - slowMA) / (safeAtr * 0.35) * 100.0, -100.0, 100.0)
+float maSepStrength = (math.abs(mamaSpreadScore) + math.abs(emaSepScore)) * 0.50
+float maSepDelta3 = maSepStrength - nz(maSepStrength[3], maSepStrength)
+bool maSlopesBull = mamaSlopeScore > 0.0 and fastMASlope > 0.0 and slowMASlope > 0.0
+bool maSlopesBear = mamaSlopeScore < 0.0 and fastMASlope < 0.0 and slowMASlope < 0.0
+int maCoreDir = mamaDir == emaDir ? mamaDir : 0
+string maCorePhase = "HOLD"
+if maSepStrength < 18.0
+    maCoreDir := 0
+    maCorePhase := "COMPRESS"
+else if mamaDir == 0 or emaDir == 0 or mamaDir != emaDir
+    maCoreDir := 0
+    maCorePhase := "FLIP"
+else if maSepDelta3 >= 6.0 and ((maCoreDir == 1 and maSlopesBull) or (maCoreDir == -1 and maSlopesBear))
+    maCorePhase := "EXPAND"
+else if maSepDelta3 <= -6.0 or not ((maCoreDir == 1 and maSlopesBull) or (maCoreDir == -1 and maSlopesBear))
+    maCorePhase := "CONTRACT"
+else
+    maCorePhase := "HOLD"
+string maCoreState = maCorePhase == "COMPRESS" ? "COMPRESS" : maCorePhase == "FLIP" ? "FLIP" : maCoreDir > 0 ? "BULL • " + maCorePhase : maCoreDir < 0 ? "BEAR • " + maCorePhase : "MIX • " + maCorePhase
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  4. STRUCTURAL SWING ENGINE                                            ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_SWING = "04 • Structure / Swings"
+
+int manualLeft = input.int(5, "Manual Left Bars", minval = 1, maxval = 50, group = GRP_SWING)
+int manualRight = input.int(5, "Manual Right Bars", minval = 1, maxval = 50, group = GRP_SWING)
+bool showZigzag = input.bool(true, "Show structural swing lines", group = GRP_SWING)
+bool autoSwingColor = input.bool(true, "Spectral swing colors", group = GRP_SWING)
+color manualSwingColor = input.color(#00A878, "Manual swing color", group = GRP_SWING)
+int lineWidth = input.int(3, "Swing line width", minval = 1, maxval = 5, group = GRP_SWING)
+int maxStored = input.int(100, "Maximum stored swings", minval = 20, maxval = 240, group = GRP_SWING)
+color structureBull = #00A878
+color structureBear = bearHot
+
+int autoPivot = 8
+if intraday
+    if tfMult <= 1
+        autoPivot := 3
+    else if tfMult <= 5
+        autoPivot := 5
+    else if tfMult <= 15
+        autoPivot := 6
+
+int leftBars = autoProfile ? autoPivot : manualLeft
+int rightBars = autoProfile ? autoPivot : manualRight
+
+type Swing
+    int bar
+    int t
+    float price
+    int kind
+
+type SwingState
+    int lastKind = 0
+    float lastHighPx = na
+    float prevHighPx = na
+    int lastHighTime = na
+    float lastLowPx = na
+    float prevLowPx = na
+    int lastLowTime = na
+    int trendDir = 0
+
+var SwingState swingState = SwingState.new()
+var array<Swing> highs = array.new<Swing>()
+var array<Swing> lows = array.new<Swing>()
+var array<Swing> path = array.new<Swing>()
+var array<line> segs = array.new<line>()
+
+pushCapped(array<Swing> arr, Swing item, int cap) =>
+    arr.push(item)
+    if arr.size() > cap
+        arr.shift()
+
+replaceLast(array<Swing> arr, Swing item) =>
+    if arr.size() > 0
+        arr.set(arr.size() - 1, item)
+
+updateStructure(SwingState st) =>
+    bool haveStructure = not na(st.lastHighPx) and not na(st.prevHighPx) and not na(st.lastLowPx) and not na(st.prevLowPx)
+    if haveStructure
+        bool hh = st.lastHighPx > st.prevHighPx
+        bool lh = st.lastHighPx < st.prevHighPx
+        bool hl = st.lastLowPx > st.prevLowPx
+        bool ll = st.lastLowPx < st.prevLowPx
+        st.trendDir := hh and hl ? 1 : lh and ll ? -1 : 0
+
+redrawLastSeg() =>
+    if showZigzag and path.size() >= 2 and segs.size() > 0
+        Swing a = path.get(path.size() - 2)
+        Swing b = path.get(path.size() - 1)
+        line ln = segs.get(segs.size() - 1)
+        ln.set_xy1(a.bar, a.price)
+        ln.set_xy2(b.bar, b.price)
+        color updatedColor = autoSwingColor ? (b.price >= a.price ? structureBull : structureBear) : manualSwingColor
+        ln.set_color(updatedColor)
+
+addSeg() =>
+    if showZigzag and path.size() >= 2
+        Swing a = path.get(path.size() - 2)
+        Swing b = path.get(path.size() - 1)
+        color segColor = autoSwingColor ? (b.price >= a.price ? structureBull : structureBear) : manualSwingColor
+        line ln = line.new(a.bar, a.price, b.bar, b.price, xloc = xloc.bar_index, color = segColor, width = lineWidth)
+        segs.push(ln)
+        if segs.size() > maxStored * 2
+            line old = segs.shift()
+            line.delete(old)
+
+acceptSwing(SwingState st, int kind, float px, int swingBar, int swingTime) =>
+    int event = 0
+    Swing sw = Swing.new(swingBar, swingTime, px, kind)
+    bool sameSide = st.lastKind == kind and path.size() > 0
+
+    if sameSide
+        Swing previous = path.get(path.size() - 1)
+        bool moreExtreme = kind == 1 ? px > previous.price : px < previous.price
+        if moreExtreme
+            path.set(path.size() - 1, sw)
+            if kind == 1
+                st.lastHighPx := px
+                st.lastHighTime := swingTime
+                replaceLast(highs, sw)
+            else
+                st.lastLowPx := px
+                st.lastLowTime := swingTime
+                replaceLast(lows, sw)
+            redrawLastSeg()
+            updateStructure(st)
+            event := kind
+    else
+        path.push(sw)
+        if path.size() > maxStored * 2
+            path.shift()
+            if segs.size() > 0
+                line old = segs.shift()
+                line.delete(old)
+
+        if kind == 1
+            st.prevHighPx := st.lastHighPx
+            st.lastHighPx := px
+            st.lastHighTime := swingTime
+            pushCapped(highs, sw, maxStored)
+        else
+            st.prevLowPx := st.lastLowPx
+            st.lastLowPx := px
+            st.lastLowTime := swingTime
+            pushCapped(lows, sw, maxStored)
+
+        st.lastKind := kind
+        addSeg()
+        updateStructure(st)
+        event := kind
+
+    if sameSide and event != 0
+        event := kind * 2
+
+    event
+
+float ph = ta.pivothigh(high, leftBars, rightBars)
+float pl = ta.pivotlow(low, leftBars, rightBars)
+
+int swingEvent = 0
+if not na(ph)
+    swingEvent := acceptSwing(swingState, 1, high[rightBars], bar_index[rightBars], time[rightBars])
+
+if not na(pl)
+    int lowEvent = acceptSwing(swingState, -1, low[rightBars], bar_index[rightBars], time[rightBars])
+    swingEvent := lowEvent != 0 ? lowEvent : swingEvent
+
+float structureScore = swingState.trendDir == 1 ? 100.0 : swingState.trendDir == -1 ? -100.0 : 0.0
+
+// F1.1 Structure Freshness: age of latest confirmed alternating swing evidence.
+// Same-side pivot replacement refines the live leg but does not make old structure fresh again.
+var int lastStructureEvidenceBar = na
+if swingEvent == 1 or swingEvent == -1
+    lastStructureEvidenceBar := bar_index[rightBars]
+int structureAgeBars = na(lastStructureEvidenceBar) ? 1000000 : bar_index - lastStructureEvidenceBar
+string structureFreshness = structureAgeBars <= 2 * rightBars ? "FRESH" : structureAgeBars <= 6 * rightBars ? "MATURE" : "AGING"
+string structureRelation = "CONFLICT"
+if swingState.trendDir == 1 and maCoreDir == 1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "CONFIRMED"
+else if swingState.trendDir == 1 and maCoreDir == 1 and maCorePhase == "CONTRACT"
+    structureRelation := "COOLING"
+else if swingState.trendDir == 1 and structureFreshness == "AGING" and maCoreDir == -1 and maCorePhase == "EXPAND"
+    structureRelation := "REVERSAL PRESSURE"
+else if swingState.trendDir == -1 and maCoreDir == -1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "CONFIRMED"
+else if swingState.trendDir == -1 and maCoreDir == -1 and maCorePhase == "CONTRACT"
+    structureRelation := "COOLING"
+else if swingState.trendDir == -1 and structureFreshness == "AGING" and maCoreDir == 1 and maCorePhase == "EXPAND"
+    structureRelation := "REVERSAL PRESSURE"
+else if swingState.trendDir == -1 and maCoreDir == 1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "RECOVERY PRESSURE"
+else if swingState.trendDir == 1 and maCoreDir == -1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "RECOVERY PRESSURE"
+else if swingState.trendDir == 0 and maCoreDir == 1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "BUILDING BULL"
+else if swingState.trendDir == 0 and maCoreDir == -1 and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+    structureRelation := "BUILDING BEAR"
+else if swingState.trendDir == 0 and maCorePhase == "COMPRESS"
+    structureRelation := "UNRESOLVED"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  5. FUSION ENGINE                                                      ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_FUSION = "05 • Fusion Engine"
+
+float mamaWeight = input.float(0.45, "MAMA Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+float macdWeight = input.float(0.35, "MACD Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+float structureWeight = input.float(0.20, "Structure Weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_FUSION)
+
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  5B. TDI LINK / CONFLUENCE                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_TDI_LINK = "06 • TDI Link / Confluence"
+
+string tdiIntegration = input.string("Advisory", "TDI Integration", options = ["Off", "Advisory", "Confirm"], group = GRP_TDI_LINK)
+string tdiLinkOverride = input.string("Auto", "TDI Link Detection", options = ["Auto", "Force Unlinked"], group = GRP_TDI_LINK)
+float tdiBusSrc = input.source(close, "TDI Bridge Bus", group = GRP_TDI_LINK,
+ tooltip = "Select TDI ∞ 1g → TDI Bridge Bus once. ACW decodes Trend, Momentum, Flow, Quality, Regime, Ready and Event semantics automatically.")
+
+// Single-source F semantic bridge decoder. F is negative; E buses are positive.
+const float TDI_F_BUS_MAGIC = 1000000000000000.0
+const float TDI_F_BUS_MAX_PAYLOAD = 4958740783038419.0
+const float TDI_E_BUS_MAGIC = 3200000000000000.0
+const float TDI_E_BUS_MAX_PAYLOAD = 2166487023240539.0
+float fEnvelopeIn = -tdiBusSrc
+float fPayloadIn = math.round(fEnvelopeIn - TDI_F_BUS_MAGIC)
+float fWork14 = fPayloadIn
+float fHardRiskQ = fWork14 - math.floor(fWork14 / 3.0) * 3.0
+float fWork13 = math.floor(fWork14 / 3.0)
+float fDivFreshQ = fWork13 - math.floor(fWork13 / 3.0) * 3.0
+float fWork12 = math.floor(fWork13 / 3.0)
+float fDivDirQ = fWork12 - math.floor(fWork12 / 3.0) * 3.0
+float fWork11 = math.floor(fWork12 / 3.0)
+float fAnchorScoreQ = fWork11 - math.floor(fWork11 / 21.0) * 21.0
+float fWork10 = math.floor(fWork11 / 21.0)
+float fAnchorStateQ = fWork10 - math.floor(fWork10 / 3.0) * 3.0
+float fWork9 = math.floor(fWork10 / 3.0)
+float fNearScoreQ = fWork9 - math.floor(fWork9 / 21.0) * 21.0
+float fWork8 = math.floor(fWork9 / 21.0)
+float fNearStateQ = fWork8 - math.floor(fWork8 / 3.0) * 3.0
+float fWork7 = math.floor(fWork8 / 3.0)
+float fSignalQ = fWork7 - math.floor(fWork7 / 3.0) * 3.0
+float fWork6 = math.floor(fWork7 / 3.0)
+float fReadyQ = fWork6 - math.floor(fWork6 / 5.0) * 5.0
+float fWork5 = math.floor(fWork6 / 5.0)
+float fRegimeQ = fWork5 - math.floor(fWork5 / 6.0) * 6.0
+float fWork4 = math.floor(fWork5 / 6.0)
+float fQualityQ = fWork4 - math.floor(fWork4 / 101.0) * 101.0
+float fWork3 = math.floor(fWork4 / 101.0)
+float fFlowQ = fWork3 - math.floor(fWork3 / 42.0) * 42.0
+float fWork2 = math.floor(fWork3 / 42.0)
+float fMomentumQ = fWork2 - math.floor(fWork2 / 201.0) * 201.0
+float fWork1 = math.floor(fWork2 / 201.0)
+float fTrendStateQ = fWork1 - math.floor(fWork1 / 3.0) * 3.0
+float fWork0 = math.floor(fWork1 / 3.0)
+float fTrendQ = fWork0 - math.floor(fWork0 / 201.0) * 201.0
+float fRemainder = math.floor(fWork0 / 201.0)
+
+bool tdiFRangeOK = not na(tdiBusSrc) and tdiBusSrc <= -TDI_F_BUS_MAGIC and tdiBusSrc >= -(TDI_F_BUS_MAGIC + TDI_F_BUS_MAX_PAYLOAD)
+bool tdiFFieldsOK = fTrendQ >= 0.0 and fTrendQ <= 200.0 and fTrendStateQ >= 0.0 and fTrendStateQ <= 2.0 and fMomentumQ >= 0.0 and fMomentumQ <= 200.0 and fFlowQ >= 0.0 and fFlowQ <= 41.0 and fQualityQ >= 0.0 and fQualityQ <= 100.0 and fRegimeQ >= 0.0 and fRegimeQ <= 5.0 and fReadyQ >= 0.0 and fReadyQ <= 4.0 and fSignalQ >= 0.0 and fSignalQ <= 2.0 and fNearStateQ >= 0.0 and fNearStateQ <= 2.0 and fNearScoreQ >= 0.0 and fNearScoreQ <= 20.0 and fAnchorStateQ >= 0.0 and fAnchorStateQ <= 2.0 and fAnchorScoreQ >= 0.0 and fAnchorScoreQ <= 20.0 and fDivDirQ >= 0.0 and fDivDirQ <= 2.0 and fDivFreshQ >= 0.0 and fDivFreshQ <= 2.0 and fHardRiskQ >= 0.0 and fHardRiskQ <= 2.0 and fRemainder == 0.0
+bool tdiBusValid = tdiFRangeOK and tdiFFieldsOK
+bool tdiEBusRangeOK = not na(tdiBusSrc) and tdiBusSrc >= TDI_E_BUS_MAGIC and tdiBusSrc <= TDI_E_BUS_MAGIC + TDI_E_BUS_MAX_PAYLOAD + 0.5
+bool tdiVersionMismatch = tdiEBusRangeOK and not tdiBusValid
+string tdiLinkStatus = tdiBusValid ? "LINKED" : tdiVersionMismatch ? "VERSION MISMATCH" : "UNLINKED"
+
+float tdiTrendCarrier = tdiBusValid ? fTrendQ - 100.0 : 0.0
+int tdiTrendState = tdiBusValid ? int(fTrendStateQ) - 1 : 0
+float tdiMomentum = tdiBusValid ? fMomentumQ - 100.0 : 0.0
+bool tdiFlowAvailable = tdiBusValid and fFlowQ < 41.0
+float tdiFlow = tdiFlowAvailable ? (fFlowQ - 20.0) * 5.0 : 0.0
+float tdiConfidence = tdiBusValid ? fQualityQ : 0.0
+string tdiRegimeName = fRegimeQ == 0.0 ? "SQUEEZE" : fRegimeQ == 1.0 ? "CHOP" : fRegimeQ == 2.0 ? "EXHAUSTION" : fRegimeQ == 3.0 ? "EXPANSION" : fRegimeQ == 4.0 ? "TREND" : "TRANSITION"
+float tdiReadyDir = tdiBusValid ? (fReadyQ > 2.0 ? 1.0 : fReadyQ < 2.0 ? -1.0 : 0.0) : 0.0
+bool tdiContinuationReady = tdiBusValid and (fReadyQ == 1.0 or fReadyQ == 3.0)
+float tdiSignal = tdiBusValid ? fSignalQ - 1.0 : 0.0
+int tdiNearState = tdiBusValid ? int(fNearStateQ) - 1 : 0
+float tdiNearScore = tdiBusValid ? (fNearScoreQ - 10.0) * 10.0 : 0.0
+int tdiAnchorState = tdiBusValid ? int(fAnchorStateQ) - 1 : 0
+float tdiAnchorScore = tdiBusValid ? (fAnchorScoreQ - 10.0) * 10.0 : 0.0
+int tdiDivRiskDir = tdiBusValid ? int(fDivDirQ) - 1 : 0
+int tdiDivFreshness = tdiBusValid ? int(fDivFreshQ) : 0
+int tdiHardRiskDir = tdiBusValid ? int(fHardRiskQ) - 1 : 0
+bool tdiExhaustion = tdiBusValid and tdiHardRiskDir != 0
+
+bool tdiLinked = tdiLinkOverride == "Force Unlinked" ? false : tdiBusValid
+bool tdiActive = tdiIntegration != "Off" and tdiLinked
+
+float weightSum = math.max(mamaWeight + macdWeight + structureWeight, 0.001)
+float fusionRaw = (mamaScore * mamaWeight + macdScore * macdWeight + structureScore * structureWeight) / weightSum
+float efficiencyModifier = 0.88 + 0.12 * efficiency
+float fusionScore = f_clamp(fusionRaw * efficiencyModifier, -100.0, 100.0)
+
+int fusionSign = f_sign(fusionScore)
+float mamaAgreement = fusionSign == 0 ? 0.5 : f_sign(mamaScore) == fusionSign ? 1.0 : 0.0
+float macdAgreement = fusionSign == 0 ? 0.5 : f_sign(macdScore) == fusionSign ? 1.0 : 0.0
+float structureAgreement = structureScore == 0.0 ? 0.5 : fusionSign == 0 ? 0.5 : f_sign(structureScore) == fusionSign ? 1.0 : 0.0
+float agreement = (mamaAgreement + macdAgreement + structureAgreement) / 3.0
+float confidence = f_clamp(math.abs(fusionScore) * (0.80 + 0.20 * agreement) + efficiency * 8.0, 0.0, 100.0)
+
+// ACW ↔ TDI E confluence: direction, momentum, flow and timing stay separate.
+// Direction comes from TDI Trend State; opposite Momentum alone is not conflict.
+int acwDir = fusionScore >= 15.0 ? 1 : fusionScore <= -15.0 ? -1 : 0
+int tdiDir = tdiTrendState
+bool sameDirection = tdiActive and acwDir != 0 and tdiDir != 0 and acwDir == tdiDir
+bool directionConflict = tdiActive and acwDir != 0 and tdiDir != 0 and acwDir != tdiDir
+bool acwDirectionalOnly = tdiActive and acwDir != 0 and tdiDir == 0
+bool tdiDirectionalOnly = tdiActive and acwDir == 0 and tdiDir != 0
+bool tdiTimingReady = sameDirection and tdiReadyDir == acwDir and not tdiExhaustion
+
+float tdiMomentumPrev2 = nz(tdiMomentum[2], tdiMomentum)
+bool tdiMomentumRising = tdiMomentum >= tdiMomentumPrev2 + 5.0
+bool tdiMomentumFalling = tdiMomentum <= tdiMomentumPrev2 - 5.0
+string momentumState = "NEUTRAL"
+if tdiTrendState == 1
+    momentumState := tdiMomentum >= 35.0 ? "DRIVING" : tdiMomentum <= -35.0 ? "COUNTER" : tdiMomentum <= -10.0 ? (tdiMomentumRising ? "RECOVERING" : "PULLBACK") : tdiMomentumRising and tdiMomentum < 20.0 ? "RECOVERING" : "COOLING"
+else if tdiTrendState == -1
+    momentumState := tdiMomentum <= -35.0 ? "DRIVING" : tdiMomentum >= 35.0 ? "COUNTER" : tdiMomentum >= 10.0 ? (tdiMomentumFalling ? "RECOVERING" : "PULLBACK") : tdiMomentumFalling and tdiMomentum > -20.0 ? "RECOVERING" : "COOLING"
+else
+    momentumState := tdiMomentum >= 25.0 ? "BULL MOM" : tdiMomentum <= -25.0 ? "BEAR MOM" : "NEUTRAL"
+
+float flowTrustAdj = 0.0
+if tdiActive and tdiFlowAvailable and tdiTrendState != 0 and math.abs(tdiFlow) >= 15.0
+    float flowMagnitude = math.min(math.abs(tdiFlow) * 0.10, 10.0)
+    flowTrustAdj := tdiFlow * tdiTrendState > 0.0 ? flowMagnitude : -flowMagnitude
+
+float confluenceScore = fusionScore
+float confluenceConfidence = confidence
+string confluenceState = "ACW ONLY"
+string timingState = "NATIVE"
+
+if tdiActive
+    float minConf = math.min(confidence, tdiConfidence) / 100.0
+    if sameDirection
+        float room = 100.0 - math.abs(fusionScore)
+        float trendSupport = math.min(math.abs(tdiTrendCarrier), room)
+        float boostWeight = 0.12 + 0.20 * minConf
+        float boost = trendSupport * boostWeight
+        confluenceScore := f_clamp(fusionScore + acwDir * boost, -100.0, 100.0)
+        confluenceConfidence := f_clamp(0.55 * confidence + 0.30 * tdiConfidence + 15.0 * minConf, 0.0, 100.0)
+        confluenceState := "ALIGNED"
+        timingState := "WAIT TIMING"
+        if tdiExhaustion
+            timingState := tdiDir > 0 ? "EXHAUST ↑" : "EXHAUST ↓"
+        else if tdiRegimeName == "SQUEEZE"
+            timingState := "WAIT • SQUEEZE"
+        else if tdiRegimeName == "CHOP"
+            timingState := "WAIT • CHOP"
+        else if not tdiTimingReady
+            timingState := "WAIT TIMING"
+        else if momentumState == "COUNTER"
+            timingState := "WAIT • COUNTER"
+        else if tdiContinuationReady
+            timingState := "READY • TREND"
+        else
+            timingState := "READY"
+    else if directionConflict
+        confluenceScore := fusionScore * 0.65
+        confluenceConfidence := f_clamp(math.min(confidence, tdiConfidence) * 0.55, 0.0, 100.0)
+        confluenceState := "CONFLICT"
+        timingState := "BLOCKED"
+    else if acwDirectionalOnly
+        confluenceScore := fusionScore
+        confluenceConfidence := confidence * 0.88
+        confluenceState := "ACW LEADS"
+        timingState := "WAIT TIMING"
+    else if tdiDirectionalOnly
+        confluenceScore := tdiTrendCarrier
+        confluenceConfidence := tdiConfidence * 0.82
+        confluenceState := "TDI LEADS"
+        timingState := "WAIT CONTEXT"
+    else
+        confluenceScore := fusionScore
+        confluenceConfidence := f_clamp(0.70 * confidence + 0.30 * tdiConfidence, 0.0, 100.0)
+        confluenceState := "NEUTRAL"
+        timingState := "WAIT"
+    confluenceConfidence := f_clamp(confluenceConfidence + flowTrustAdj, 0.0, 100.0)
+
+// 1e3 context-assisted continuation: TDI's medium trend state can be promoted only
+// when ACW independently supplies strong score + confirmed swing structure. CHOP is
+// a soft veto here; SQUEEZE and exhaustion remain hard blockers.
+bool contextStructureAligned = sameDirection and swingState.trendDir == acwDir and swingState.trendDir != 0
+bool contextContinuationReady = tdiActive and sameDirection and not tdiTimingReady and contextStructureAligned and math.abs(fusionScore) >= 60.0 and math.abs(tdiTrendCarrier) >= 32.0 and tdiTrendCarrier * acwDir > 0.0 and tdiMomentum * acwDir >= 12.0 and confluenceConfidence >= 55.0 and tdiRegimeName != "SQUEEZE" and not tdiExhaustion and momentumState != "COUNTER"
+if contextContinuationReady
+    timingState := "READY • CONT"
+
+// Structural context remains ACW's authority even when TDI persistent direction agrees.
+bool recoveryContext = tdiActive and sameDirection and confluenceScore > 15.0 and swingState.trendDir == -1
+bool pullbackContext = tdiActive and sameDirection and confluenceScore < -15.0 and swingState.trendDir == 1
+string contextState = confluenceState
+if recoveryContext
+    contextState := tdiExhaustion ? "RECOVERY ↑ / EXH" : momentumState == "COOLING" ? "RECOVERY ↑ / COOL" : "RECOVERY ↑"
+else if pullbackContext
+    contextState := tdiExhaustion ? "PULLBACK ↓ / EXH" : momentumState == "COOLING" ? "PULLBACK ↓ / COOL" : "PULLBACK ↓"
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  6. MARKET STATE / REGIME                                              ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+bool compression = volRank < 25.0 and math.abs(macdScore) <= 40.0
+bool expansion = volRank >= 65.0 and math.abs(fusionScore) >= 50.0
+bool fullAlignment = swingState.trendDir != 0 and f_sign(mamaScore) == swingState.trendDir and f_sign(macdScore) == swingState.trendDir
+bool conflict = math.abs(mamaScore) >= 40.0 and math.abs(macdScore) >= 40.0 and f_sign(mamaScore) != f_sign(macdScore)
+
+string regime = "TRANSITION"
+if compression
+    regime := "COMPRESSION"
+else if expansion
+    regime := "EXPANSION"
+else if fullAlignment
+    regime := "TREND"
+else if conflict
+    regime := "CONFLICT"
+
+
+string actionName = "WAIT"
+if fusionScore >= 65.0 and confidence >= 60.0
+    actionName := "LONG IMPULSE"
+else if fusionScore >= 35.0
+    actionName := "LONG WATCH"
+else if fusionScore <= -65.0 and confidence >= 60.0
+    actionName := "SHORT IMPULSE"
+else if fusionScore <= -35.0
+    actionName := "SHORT WATCH"
+
+string linkedAction = actionName
+if tdiActive
+    linkedAction := "WAIT"
+    if directionConflict
+        linkedAction := "WAIT • CONFLICT"
+    else if acwDirectionalOnly
+        linkedAction := "WAIT TIMING"
+    else if tdiDirectionalOnly
+        linkedAction := "WAIT CONTEXT"
+    else if sameDirection
+        if tdiExhaustion
+            // F1.3: exhaustion is a risk authority, not an automatic trend reversal.
+            // Preserve the directional candidate as WATCH so the F risk layer can decide
+            // whether this is merely a tired trend or a mature/strong exhaustion stop.
+            linkedAction := confluenceScore > 0.0 ? "LONG WATCH" : "SHORT WATCH"
+        else if tdiRegimeName == "SQUEEZE"
+            linkedAction := "WAIT • SQUEEZE"
+        else if momentumState == "COUNTER"
+            linkedAction := "WAIT • COUNTER"
+        else if recoveryContext
+            linkedAction := "LONG WATCH"
+        else if pullbackContext
+            linkedAction := "SHORT WATCH"
+        else if contextContinuationReady
+            linkedAction := confluenceScore > 0.0 ? "LONG CONT" : "SHORT CONT"
+        else if tdiRegimeName == "CHOP"
+            linkedAction := "WAIT • CHOP"
+        else if not tdiTimingReady
+            linkedAction := "WAIT TIMING"
+        else if tdiContinuationReady and math.abs(confluenceScore) >= 55.0 and confluenceConfidence >= 50.0
+            linkedAction := confluenceScore > 0.0 ? "LONG CONT" : "SHORT CONT"
+        else if tdiContinuationReady
+            linkedAction := confluenceScore > 0.0 ? "LONG WATCH" : "SHORT WATCH"
+        else if math.abs(confluenceScore) >= 65.0 and confluenceConfidence >= 62.0
+            linkedAction := confluenceScore > 0.0 ? "LONG SYNC" : "SHORT SYNC"
+        else if math.abs(confluenceScore) >= 35.0
+            linkedAction := confluenceScore > 0.0 ? "LONG WATCH" : "SHORT WATCH"
+
+// F Market Interpreter: preserve E timing heritage, then qualify it with
+// MA/structure, Near/Anchor context and soft risk evidence. No new master score.
+bool fLegacyContinuationCandidate = contextContinuationReady or tdiContinuationReady
+bool fLegacyImpulseCandidate = tdiTimingReady and not fLegacyContinuationCandidate
+bool fLegacyReady = linkedAction == "LONG CONT" or linkedAction == "SHORT CONT" or linkedAction == "LONG SYNC" or linkedAction == "SHORT SYNC" or (not tdiActive and (actionName == "LONG IMPULSE" or actionName == "SHORT IMPULSE"))
+bool fLegacyWatch = linkedAction == "LONG WATCH" or linkedAction == "SHORT WATCH" or (not tdiActive and (actionName == "LONG WATCH" or actionName == "SHORT WATCH"))
+
+int fActionDir = 0
+if tdiActive
+    fActionDir := sameDirection ? acwDir : acwDirectionalOnly ? acwDir : tdiDirectionalOnly ? tdiDir : 0
+else
+    fActionDir := acwDir
+
+string fReadiness = fLegacyReady ? "READY" : fLegacyWatch ? "WATCH" : "WAIT"
+string fArchetype = fLegacyContinuationCandidate ? "CONT" : fLegacyImpulseCandidate ? "IMPULSE" : "WAIT"
+if recoveryContext and fActionDir > 0
+    fArchetype := "RECOVERY"
+else if pullbackContext and fActionDir < 0
+    fArchetype := "PULLBACK"
+
+bool fBothContextsSupport = fActionDir != 0 and tdiNearState == fActionDir and tdiAnchorState == fActionDir
+bool fBothContextsOppose = fActionDir != 0 and tdiNearState == -fActionDir and tdiAnchorState == -fActionDir
+string fScope = fActionDir == 0 ? "NONE" : tdiActive and fBothContextsSupport ? "MTF" : "LOCAL"
+string fNearTag = tdiNearState > 0 ? "↑" : tdiNearState < 0 ? "↓" : "·"
+string fAnchorTag = tdiAnchorState > 0 ? "↑" : tdiAnchorState < 0 ? "↓" : "·"
+string fNearWord = tdiNearState > 0 ? "BULL" : tdiNearState < 0 ? "BEAR" : "MIX"
+string fAnchorWord = tdiAnchorState > 0 ? "BULL" : tdiAnchorState < 0 ? "BEAR" : "MIX"
+float fChartTfSeconds = timeframe.in_seconds()
+string fNearTfLabel = f_tfLabel(f_autoNear(fChartTfSeconds))
+string fAnchorTfLabel = f_tfLabel(f_autoAnchor(fChartTfSeconds))
+string fContextCompact = tdiActive ? "N " + fNearTag + " • A " + fAnchorTag : "LOCAL ONLY"
+string fContextText = tdiActive ? "NEAR " + fNearTfLabel + " " + fNearWord + " " + str.tostring(tdiNearScore, "#.0") + " • ANCHOR " + fAnchorTfLabel + " " + fAnchorWord + " " + str.tostring(tdiAnchorScore, "#.0") : "LOCAL ONLY"
+
+// F1.1 semantic rescue: ordinary CHOP/legacy WAIT may become WATCH when the price layer
+// and local direction are coherent. This never manufactures READY. SQUEEZE/EXHAUST remain hard stops.
+bool fMaSupports = fActionDir != 0 and maCoreDir == fActionDir and (maCorePhase == "EXPAND" or maCorePhase == "HOLD")
+bool fStructureCompatible = fActionDir != 0 and (swingState.trendDir == 0 or swingState.trendDir == fActionDir)
+bool fSemanticDirectionOK = sameDirection or (acwDirectionalOnly and swingState.trendDir == fActionDir and math.abs(fusionScore) >= 35.0)
+bool fSemanticWatchCandidate = tdiActive and fActionDir != 0 and not directionConflict and fMaSupports and fStructureCompatible and fSemanticDirectionOK and momentumState != "COUNTER"
+if fReadiness == "WAIT" and fSemanticWatchCandidate and tdiRegimeName != "SQUEEZE" and not tdiExhaustion
+    fReadiness := "WATCH"
+    if fArchetype == "WAIT"
+        fArchetype := swingState.trendDir == fActionDir ? "CONT" : "RECOVERY"
+
+if fBothContextsOppose
+    fArchetype := structureRelation == "RECOVERY PRESSURE" or structureRelation == "COOLING" ? "RECOVERY" : "COUNTERTREND"
+    bool fCounterImpulseException = fLegacyImpulseCandidate and fReadiness == "READY" and maCorePhase == "EXPAND" and maCoreDir == fActionDir
+    if fReadiness == "READY" and not fCounterImpulseException
+        fReadiness := "WATCH"
+
+bool fVisibleDiv = tdiDivRiskDir != 0 and tdiDivFreshness > 0
+bool fOpposingDiv = fActionDir != 0 and tdiDivRiskDir == -fActionDir and tdiDivFreshness > 0
+bool fDivergenceCorroborated = maCorePhase == "CONTRACT" or momentumState == "COOLING" or momentumState == "PULLBACK" or tdiNearState != fActionDir or structureFreshness == "AGING"
+bool fFlowOpposes = tdiActive and tdiFlowAvailable and fActionDir != 0 and math.abs(tdiFlow) >= 15.0 and tdiFlow * fActionDir < 0.0
+
+float fSoftPenalty = 0.0
+if fFlowOpposes
+    fSoftPenalty += 6.0
+if fOpposingDiv and tdiDivFreshness == 2
+    fSoftPenalty += 8.0
+else if fOpposingDiv and tdiDivFreshness == 1
+    fSoftPenalty += 4.0
+if fActionDir != 0 and tdiNearState == -fActionDir
+    fSoftPenalty += 4.0
+if fActionDir != 0 and tdiAnchorState == -fActionDir
+    fSoftPenalty += 4.0
+if structureRelation == "REVERSAL PRESSURE"
+    fSoftPenalty += 6.0
+fSoftPenalty := math.min(fSoftPenalty, 20.0)
+float fQuality = f_clamp(confluenceConfidence - fSoftPenalty, 0.0, 100.0)
+
+if fOpposingDiv and tdiDivFreshness == 2 and fDivergenceCorroborated and fReadiness == "READY"
+    fReadiness := "WATCH"
+
+bool fExhaustionBlock = fActionDir != 0 and tdiHardRiskDir == fActionDir
+int fExhaustionVotes = 0
+if fExhaustionBlock and (momentumState == "COOLING" or momentumState == "PULLBACK")
+    fExhaustionVotes += 1
+if fExhaustionBlock and (maCorePhase == "CONTRACT" or maCorePhase == "COMPRESS")
+    fExhaustionVotes += 1
+if fExhaustionBlock and structureFreshness != "FRESH"
+    fExhaustionVotes += 1
+if fExhaustionBlock and tdiNearState != 0 and tdiNearState != fActionDir
+    fExhaustionVotes += 1
+bool fExhaustionStrong = fExhaustionBlock and fExhaustionVotes >= 2
+bool fExhaustionContinuationCandidate = fExhaustionBlock and sameDirection and fMaSupports and fStructureCompatible and momentumState != "COUNTER" and math.abs(confluenceScore) >= 35.0 and confluenceConfidence >= 45.0
+bool fSqueezeBlock = tdiActive and tdiRegimeName == "SQUEEZE" and fActionDir != 0
+
+// F1.3 risk authority. Ordinary exhaustion only preserves WATCH when the underlying
+// continuation was otherwise coherent; corroborated/mature exhaustion is a hard WAIT.
+if fExhaustionStrong
+    fReadiness := "WAIT"
+else if fExhaustionBlock and not fExhaustionContinuationCandidate
+    fReadiness := "WAIT"
+else if fExhaustionBlock and fReadiness == "READY"
+    fReadiness := "WATCH"
+if fExhaustionBlock and fExhaustionContinuationCandidate and not fExhaustionStrong and fReadiness == "WATCH" and fArchetype == "WAIT"
+    fArchetype := "CONT"
+
+// Dominant risk language is intentionally ordered: Exhaustion → Divergence → Flow → Anchor → Structure.
+string fRiskText = ""
+if fExhaustionBlock
+    string fExhaustTag = fExhaustionStrong ? (fActionDir > 0 ? "TREND EXHAUSTED ↑" : "TREND EXHAUSTED ↓") : (fActionDir > 0 ? "TREND TIRED ↑" : "TREND TIRED ↓")
+    fRiskText := fExhaustTag
+if fVisibleDiv
+    string fDivTag = tdiDivRiskDir < 0 ? (tdiDivFreshness == 2 ? "BEAR DIVERGENCE FRESH" : "BEAR DIVERGENCE ACTIVE") : (tdiDivFreshness == 2 ? "BULL DIVERGENCE FRESH" : "BULL DIVERGENCE ACTIVE")
+    fRiskText := fRiskText == "" ? fDivTag : fRiskText + " • " + fDivTag
+if fFlowOpposes
+    fRiskText := fRiskText == "" ? "FLOW OPPOSES" : fRiskText + " • FLOW OPPOSES"
+if fActionDir != 0 and tdiAnchorState == -fActionDir
+    fRiskText := fRiskText == "" ? "ANCHOR OPPOSES" : fRiskText + " • ANCHOR OPPOSES"
+if structureRelation == "REVERSAL PRESSURE"
+    fRiskText := fRiskText == "" ? "REVERSAL PRESSURE" : fRiskText + " • REVERSAL PRESSURE"
+if fRiskText == ""
+    fRiskText := "NONE"
+
+string fWaitReason = "WAIT"
+if tdiActive and tdiRegimeName == "SQUEEZE"
+    fWaitReason := "WAIT • SQUEEZE"
+else if tdiActive and tdiRegimeName == "EXHAUSTION"
+    fWaitReason := "WAIT • EXHAUST"
+else if directionConflict
+    fWaitReason := "WAIT • CONFLICT"
+else if linkedAction == "WAIT CONTEXT"
+    fWaitReason := "WAIT • CONTEXT"
+else if linkedAction == "WAIT • COUNTER"
+    fWaitReason := "WAIT • COUNTER"
+else if tdiActive and tdiRegimeName == "CHOP"
+    fWaitReason := "WAIT • CHOP"
+else if linkedAction == "WAIT TIMING"
+    fWaitReason := "WAIT • TIMING"
+
+string fActionText = fWaitReason
+if fExhaustionStrong or (fExhaustionBlock and not fExhaustionContinuationCandidate)
+    fReadiness := "WAIT"
+    fScope := "NONE"
+    fActionText := "WAIT • EXHAUST"
+else if fSqueezeBlock
+    fReadiness := "WAIT"
+    fScope := "NONE"
+    fActionText := "WAIT • SQUEEZE"
+else if fReadiness != "WAIT" and fActionDir != 0
+    string fDirWord = fActionDir > 0 ? "LONG" : "SHORT"
+    if fArchetype == "RECOVERY"
+        fActionText := fActionDir > 0 ? "RECOVERY ↑" : "RECOVERY ↓"
+    else if fArchetype == "PULLBACK"
+        fActionText := fActionDir > 0 ? "PULLBACK ↑" : "PULLBACK ↓"
+    else
+        fActionText := fDirWord + " " + fScope + " " + fArchetype
+else
+    fActionText := fWaitReason
+
+// G final promotion layer. Balanced is deliberately identity behavior versus F1.3.
+bool gFreshOpposingDiv = fOpposingDiv and tdiDivFreshness == 2
+bool gCorroboratedFreshOpposingDiv = gFreshOpposingDiv and fDivergenceCorroborated
+bool gAnchorOpposes = fActionDir != 0 and tdiAnchorState == -fActionDir
+string gReadiness = f_applyPersonality(fReadiness, signalPersonality, fQuality, math.abs(confluenceScore), fMaSupports, fStructureCompatible, momentumState == "COUNTER", fBothContextsOppose, directionConflict, fSqueezeBlock, fExhaustionStrong, gFreshOpposingDiv, gCorroboratedFreshOpposingDiv, fFlowOpposes, math.abs(tdiFlow), gAnchorOpposes)
+int gActionDir = fActionDir
+
+// G confirmed-bar lifecycle. This layer records opportunity history but never feeds back into readiness.
+var string gLifecycleState = "IDLE"
+var int gLifecycleDir = 0
+var int gEntryBar = na
+var float gEntryPrice = na
+var string gEntryArchetype = "WAIT"
+var string gEntryScope = "NONE"
+var string gEntryPersonality = "Balanced"
+var string gLifecycleReason = "NONE"
+var int gLastEntryBar = na
+var float gLastEntryPrice = na
+var int gLastExitBar = na
+var float gLastExitPrice = na
+var float gLastResultPct = na
+var int gLastTradeBars = na
+var int gLastTradeDir = 0
+var string gLastTerminalType = "NONE"
+var string gLastTerminalReason = "NONE"
+var line gActiveTradeLine = na
+var bool gLongArmed = true
+var bool gShortArmed = true
+var int gLongResetBars = 0
+var int gShortResetBars = 0
+var int gPrevReadyDir = 0
+var int gWaitStreak = 0
+
+bool gEntryLongEvent = false
+bool gEntryShortEvent = false
+bool gCautionEvent = false
+bool gExitEvent = false
+bool gInvalidationEvent = false
+int gEventDir = 0
+string gEventReason = "NONE"
+
+bool gLifecycleInputsValid = not na(fusionScore) and not na(confluenceScore) and not na(fQuality)
+int gReadyNowDir = gLifecycleInputsValid and gReadiness == "READY" and gActionDir != 0 ? gActionDir : 0
+
+if barstate.isconfirmed
+    // Re-arm only after two confirmed bars where that direction is not READY.
+    if not gLongArmed
+        if gReadyNowDir != 1
+            gLongResetBars += 1
+            if gLongResetBars >= 2
+                gLongArmed := true
+        else
+            gLongResetBars := 0
+    if not gShortArmed
+        if gReadyNowDir != -1
+            gShortResetBars += 1
+            if gShortResetBars >= 2
+                gShortArmed := true
+        else
+            gShortResetBars := 0
+
+    bool gTerminalEvent = false
+    if (gLifecycleState == "ACTIVE" or gLifecycleState == "CAUTION") and gLifecycleDir != 0 and gLifecycleInputsValid
+        bool gFlowAvailableActive = tdiActive and tdiFlowAvailable
+        bool gExhaustionSameDir = tdiActive and tdiHardRiskDir == gLifecycleDir
+        int gExhaustionVotesActive = 0
+        if gExhaustionSameDir and (momentumState == "COOLING" or momentumState == "PULLBACK")
+            gExhaustionVotesActive += 1
+        if gExhaustionSameDir and (maCorePhase == "CONTRACT" or maCorePhase == "COMPRESS")
+            gExhaustionVotesActive += 1
+        if gExhaustionSameDir and structureFreshness != "FRESH"
+            gExhaustionVotesActive += 1
+        if gExhaustionSameDir and tdiNearState != 0 and tdiNearState != gLifecycleDir
+            gExhaustionVotesActive += 1
+        bool gStrongExhaustionActive = gExhaustionSameDir and gExhaustionVotesActive >= 2
+        bool gFreshOppDivActive = tdiActive and tdiDivRiskDir == -gLifecycleDir and tdiDivFreshness == 2
+        bool gDivCorroboratedActive = gFreshOppDivActive and (maCorePhase == "CONTRACT" or momentumState == "COOLING" or momentumState == "PULLBACK" or tdiNearState != gLifecycleDir or structureFreshness == "AGING")
+        int gDeteriorationVotes = f_deteriorationVotes(gLifecycleDir, gFlowAvailableActive, tdiFlow, tdiAnchorState, momentumState, maCorePhase, structureFreshness, structureRelation == "REVERSAL PRESSURE")
+        bool gOppositeReady = gReadiness == "READY" and gActionDir == -gLifecycleDir
+        bool gInvalidNow = f_invalidated(gLifecycleDir, gOppositeReady, maCoreDir, swingState.trendDir, tdiTrendState)
+        string gCautionReasonNow = f_cautionReason(gLifecycleDir, gExhaustionSameDir, gStrongExhaustionActive, gFreshOppDivActive, gFlowAvailableActive, tdiFlow, tdiAnchorState, momentumState, maCorePhase)
+        bool gCautionNow = gCautionReasonNow != "NONE"
+        if gReadiness == "WAIT"
+            gWaitStreak += 1
+        else
+            gWaitStreak := 0
+        bool gExitNow = gStrongExhaustionActive or gDivCorroboratedActive or gDeteriorationVotes >= 2 or (gWaitStreak >= 2 and gDeteriorationVotes >= 1)
+
+        // Deterministic priority: INV → X → CAUTION → recovery.
+        if gInvalidNow
+            gInvalidationEvent := true
+            gEventDir := gLifecycleDir
+            gEventReason := "TREND FLIPPED"
+            gTerminalEvent := true
+        else if gExitNow
+            gExitEvent := true
+            gEventDir := gLifecycleDir
+            gEventReason := gStrongExhaustionActive ? "TREND EXHAUSTED" : gDivCorroboratedActive ? "DIVERGENCE CONFIRMED" : "EDGE DETERIORATED"
+            gTerminalEvent := true
+        else if gCautionNow and gLifecycleState == "ACTIVE"
+            gLifecycleState := "CAUTION"
+            gLifecycleReason := gCautionReasonNow
+            gCautionEvent := true
+            gEventDir := gLifecycleDir
+            gEventReason := gCautionReasonNow
+        else if not gCautionNow and gLifecycleState == "CAUTION"
+            gLifecycleState := "ACTIVE"
+            gLifecycleReason := "NONE"
+
+        if gTerminalEvent
+            int gExitedDir = gLifecycleDir
+            gLastEntryBar := gEntryBar
+            gLastEntryPrice := gEntryPrice
+            gLastExitBar := bar_index
+            gLastExitPrice := close
+            gLastTradeDir := gExitedDir
+            gLastTradeBars := not na(gEntryBar) ? bar_index - gEntryBar : na
+            gLastResultPct := not na(gEntryPrice) and gEntryPrice != 0.0 ? 100.0 * (close - gEntryPrice) / gEntryPrice * gExitedDir : na
+            gLastTerminalType := gInvalidationEvent ? "INV" : "X"
+            gLastTerminalReason := gEventReason
+            color gFinishedLineColor = color.new(not na(gLastResultPct) and gLastResultPct >= 0.0 ? gLongMarkColor : gShortMarkColor, 38)
+            if showCompletedTradeConnectors
+                if not na(gActiveTradeLine)
+                    line.set_xy2(gActiveTradeLine, bar_index, gLastExitPrice)
+                    line.set_color(gActiveTradeLine, gFinishedLineColor)
+                    line.set_style(gActiveTradeLine, line.style_dotted)
+                    line.set_width(gActiveTradeLine, 1)
+                else if not na(gLastEntryBar) and not na(gLastEntryPrice)
+                    line.new(gLastEntryBar, gLastEntryPrice, bar_index, gLastExitPrice, xloc = xloc.bar_index, extend = extend.none, color = gFinishedLineColor, style = line.style_dotted, width = 1)
+            else if not na(gActiveTradeLine)
+                line.delete(gActiveTradeLine)
+            gActiveTradeLine := na
+            gLifecycleState := "IDLE"
+            gLifecycleDir := 0
+            gEntryBar := na
+            gEntryPrice := na
+            gEntryArchetype := "WAIT"
+            gEntryScope := "NONE"
+            gEntryPersonality := signalPersonality
+            gLifecycleReason := "NONE"
+            gWaitStreak := 0
+            if gExitedDir == 1
+                gLongArmed := false
+                gLongResetBars := 0
+            else if gExitedDir == -1
+                gShortArmed := false
+                gShortResetBars := 0
+
+    bool gFirstReadyEpisode = gReadyNowDir != 0 and gPrevReadyDir != gReadyNowDir
+    bool gDirectionArmed = gReadyNowDir == 1 ? gLongArmed : gReadyNowDir == -1 ? gShortArmed : false
+    bool gAnyTerminalEvent = gExitEvent or gInvalidationEvent
+    if not gAnyTerminalEvent and gLifecycleState == "IDLE" and gFirstReadyEpisode and gDirectionArmed
+        gLifecycleState := "ACTIVE"
+        gLifecycleDir := gReadyNowDir
+        gEntryBar := bar_index
+        gEntryPrice := close
+        gEntryArchetype := fArchetype
+        gEntryScope := fScope
+        gEntryPersonality := signalPersonality
+        gLifecycleReason := "NONE"
+        gWaitStreak := 0
+        if showActiveTradeConnector
+            gActiveTradeLine := line.new(gEntryBar, gEntryPrice, bar_index, close, xloc = xloc.bar_index, extend = extend.none, color = color.new(gReadyNowDir > 0 ? gLongMarkColor : gShortMarkColor, 58), style = line.style_dotted, width = 1)
+        if gReadyNowDir == 1
+            gEntryLongEvent := true
+            gEventDir := 1
+            gLongArmed := false
+            gLongResetBars := 0
+        else
+            gEntryShortEvent := true
+            gEventDir := -1
+            gShortArmed := false
+            gShortResetBars := 0
+    gPrevReadyDir := gReadyNowDir
+
+if showActiveTradeConnector and not na(gActiveTradeLine) and (gLifecycleState == "ACTIVE" or gLifecycleState == "CAUTION")
+    line.set_xy2(gActiveTradeLine, bar_index, close)
+
+int gSignalAge = (gLifecycleState == "ACTIVE" or gLifecycleState == "CAUTION") and not na(gEntryBar) ? bar_index - gEntryBar : na
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  7. SPECTRAL VISUAL ENGINE                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+plot(showMama and mamaGlow ? mama : na, "MAMA Aura Wide", color = color.new(mamaColor, 90), linewidth = 7)
+plot(showMama and mamaGlow ? mama : na, "MAMA Aura", color = color.new(mamaColor, 76), linewidth = 4)
+pMama = plot(showMama ? mama : na, "MAMA Core", color = mamaColor, linewidth = mamaWidth)
+
+color famaColor = f_scoreColor(mamaScore, 32)
+plot(showMama and mamaGlow ? fama : na, "FAMA Aura", color = color.new(famaColor, 88), linewidth = 5)
+pFama = plot(showMama ? fama : na, "FAMA Core", color = famaColor, linewidth = math.max(1, mamaWidth - 1))
+
+int mamaFillTransparency = int(math.round(f_clamp(94.0 - math.abs(mamaScore) * 0.18, 74.0, 94.0)))
+color mamaFillColor = mama > fama ? color.new(bullBase, mamaFillTransparency) : color.new(bearBase, mamaFillTransparency)
+fill(pMama, pFama, color = fillMama ? mamaFillColor : na, title = "MAMA/FAMA Spectral Energy")
+
+plot(showMacdMA and emaGlow ? fastMA : na, "Fast EMA Aura", color = color.new(macdColor, 90), linewidth = 6)
+plot(showMacdMA and emaGlow ? slowMA : na, "Slow EMA Aura", color = color.new(macdColor, 93), linewidth = 5)
+plot(showMacdMA ? fastMA : na, "MACD Fast EMA", color = color.new(macdColor, 5), linewidth = 2)
+plot(showMacdMA ? slowMA : na, "MACD Slow EMA", color = color.new(macdColor, 46), linewidth = 1)
+
+bool heatNeedsTdi = heatSource == "TDI Fusion" or heatSource == "ACW + TDI Confluence"
+bool renderSourceFallback = heatNeedsTdi and not tdiActive
+float heatScore = fusionScore
+float heatConfidence = confidence
+if heatSource == "MACD Council"
+    heatScore := macdScore
+else if heatSource == "TDI Fusion" and tdiActive
+    heatScore := tdiMomentum
+    heatConfidence := tdiConfidence
+else if heatSource == "ACW + TDI Confluence" and tdiActive
+    heatScore := confluenceScore
+    heatConfidence := confluenceConfidence
+
+float heatStrength = math.abs(heatScore) / 100.0
+float regimeBoost = expansion ? 1.15 : fullAlignment ? 1.05 : compression ? 0.82 : 0.94
+float alignmentHeatBoost = sameDirection ? (tdiTimingReady ? 1.30 : tdiExhaustion ? 0.92 : 1.08) : 1.0
+float leadHeatPenalty = acwDirectionalOnly or tdiDirectionalOnly ? 0.84 : 1.0
+float conflictHeatBoost = directionConflict ? 1.12 : 1.0
+float visibleHeatStrength = f_clamp(math.max(heatStrength, minHeatStrength) * regimeBoost * alignmentHeatBoost * leadHeatPenalty * conflictHeatBoost, 0.0, 1.0)
+int dynamicHeatTransparency = int(math.round(98.0 - (98.0 - heatTransparency) * visibleHeatStrength))
+int conflictHeatTransparency = int(f_clamp(dynamicHeatTransparency - 2.0, 0.0, 100.0))
+color heatColor = directionConflict and tdiActive ? color.new(#FFAB40, conflictHeatTransparency) : f_scoreColor(heatScore, dynamicHeatTransparency)
+bgcolor(showHeat ? heatColor : na, title = "ACW Spectral Heat")
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  8. IMPULSE / CROSS EVENTS                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+bool signalGate = not confirmedOnly or barstate.isconfirmed
+bool mamaCrossUp = ta.crossover(mama, fama)
+bool mamaCrossDown = ta.crossunder(mama, fama)
+
+int impulseCooldown = 4
+if intraday
+    if tfMult <= 1
+        impulseCooldown := 12
+    else if tfMult <= 5
+        impulseCooldown := 8
+    else if tfMult <= 15
+        impulseCooldown := 6
+
+float rearmRatio = 0.72
+var int lastBullImpulseBar = na
+var int lastBearImpulseBar = na
+var bool bullArmed = true
+var bool bearArmed = true
+
+if fusionScore < 65.0 * rearmRatio or acwDir < 0
+    bullArmed := true
+if fusionScore > -65.0 * rearmRatio or acwDir > 0
+    bearArmed := true
+
+bool bullCooldownOK = na(lastBullImpulseBar) or bar_index - lastBullImpulseBar >= impulseCooldown
+bool bearCooldownOK = na(lastBearImpulseBar) or bar_index - lastBearImpulseBar >= impulseCooldown
+bool bullNativeEligible = signalGate and fusionScore >= 65.0 and confidence >= 60.0 and bullArmed and bullCooldownOK
+bool bearNativeEligible = signalGate and fusionScore <= -65.0 and confidence >= 60.0 and bearArmed and bearCooldownOK
+
+bool bullImpulse = bullNativeEligible
+bool bearImpulse = bearNativeEligible
+
+if bullImpulse
+    lastBullImpulseBar := bar_index
+    bullArmed := false
+if bearImpulse
+    lastBearImpulseBar := bar_index
+    bearArmed := false
+
+bool confirmMode = tdiIntegration == "Confirm"
+bool tdiBullTiming = tdiActive and tdiTimingReady and acwDir == 1
+bool tdiBearTiming = tdiActive and tdiTimingReady and acwDir == -1
+bool momentumBlocksSync = momentumState == "COUNTER"
+bool syncBullBase = bullImpulse and tdiActive and sameDirection and tdiTimingReady and not directionConflict and not recoveryContext and not tdiExhaustion and not momentumBlocksSync and confluenceConfidence >= 62.0 and tdiConfidence >= 55.0 and tdiBullTiming
+bool syncBearBase = bearImpulse and tdiActive and sameDirection and tdiTimingReady and not directionConflict and not pullbackContext and not tdiExhaustion and not momentumBlocksSync and confluenceConfidence >= 62.0 and tdiConfidence >= 55.0 and tdiBearTiming
+bool syncBullImpulse = syncBullBase and (not confirmMode or tdiSignal > 0.5)
+bool syncBearImpulse = syncBearBase and (not confirmMode or tdiSignal < -0.5)
+
+// In Confirm mode only the synchronized event receives premium classification.
+// Native ACW impulses remain visible and keep their original alert identity.
+bool nativeBullMarker = bullImpulse and not syncBullImpulse
+bool nativeBearMarker = bearImpulse and not syncBearImpulse
+bool earlyBullDot = showSignals and not directionConflict and fusionScore >= 45.0 and nz(fusionScore[1], fusionScore) < 45.0 and confidence >= 52.0
+bool earlyBearDot = showSignals and not directionConflict and fusionScore <= -45.0 and nz(fusionScore[1], fusionScore) > -45.0 and confidence >= 52.0
+bool compressionReleaseBull = signalGate and compression[1] and not compression and fusionScore > 35.0
+bool compressionReleaseBear = signalGate and compression[1] and not compression and fusionScore < -35.0
+
+plotshape(earlyBullDot, title = "Bull Early Alignment", style = shape.circle, location = location.belowbar, color = color.new(bullBase, 25), size = size.tiny)
+plotshape(earlyBearDot, title = "Bear Early Alignment", style = shape.circle, location = location.abovebar, color = color.new(bearBase, 25), size = size.tiny)
+plotshape(showSignals and nativeBullMarker, title = "Bull Fusion Impulse", style = shape.diamond, location = location.belowbar, color = color.new(bullHot, 10), size = size.tiny)
+plotshape(showSignals and nativeBearMarker, title = "Bear Fusion Impulse", style = shape.diamond, location = location.abovebar, color = color.new(bearHot, 10), size = size.tiny)
+plotshape(showSignals and syncBullImpulse, title = "Synchronized Bull Impulse", style = shape.diamond, location = location.belowbar, color = bullHot, size = size.normal)
+plotshape(showSignals and syncBearImpulse, title = "Synchronized Bear Impulse", style = shape.diamond, location = location.abovebar, color = bearHot, size = size.normal)
+plotshape(showSignals and compressionReleaseBull, title = "Bull Compression Release", style = shape.triangleup, location = location.belowbar, color = color.new(bullBase, 10), size = size.tiny)
+plotshape(showSignals and compressionReleaseBear, title = "Bear Compression Release", style = shape.triangledown, location = location.abovebar, color = color.new(bearBase, 10), size = size.tiny)
+plotshape(markMamaCross and mamaCrossUp, title = "MAMA Bull Cross", style = shape.circle, location = location.belowbar, color = color.new(bullBase, 20), size = size.tiny)
+plotshape(markMamaCross and mamaCrossDown, title = "MAMA Bear Cross", style = shape.circle, location = location.abovebar, color = color.new(bearBase, 20), size = size.tiny)
+
+// G1 precision lifecycle: labels are price-anchored and do not consume TradingView plot counts.
+if showLifecycleEntries and gEntryLongEvent
+    label.new(bar_index, gEntryPrice, "A↑ " + str.tostring(gEntryPrice, format.mintick), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = gLongMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleEntries and gEntryShortEvent
+    label.new(bar_index, gEntryPrice, "A↓ " + str.tostring(gEntryPrice, format.mintick), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = gShortMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleCaution and gCautionEvent and gEventDir > 0
+    label.new(bar_index, close, "!", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = gNeutralMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleCaution and gCautionEvent and gEventDir < 0
+    label.new(bar_index, close, "!", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = gNeutralMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleExit and gExitEvent and gEventDir > 0
+    label.new(bar_index, gLastExitPrice, "X " + str.tostring(gLastExitPrice, format.mintick) + " " + f_signedPct(gLastResultPct), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = not na(gLastResultPct) and gLastResultPct >= 0.0 ? gLongMarkColor : gShortMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleExit and gExitEvent and gEventDir < 0
+    label.new(bar_index, gLastExitPrice, "X " + str.tostring(gLastExitPrice, format.mintick) + " " + f_signedPct(gLastResultPct), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = not na(gLastResultPct) and gLastResultPct >= 0.0 ? gLongMarkColor : gShortMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleInvalidation and gInvalidationEvent and gEventDir > 0
+    label.new(bar_index, gLastExitPrice, "INV " + str.tostring(gLastExitPrice, format.mintick) + " " + f_signedPct(gLastResultPct), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = gInvalidMarkColor, textcolor = color.white, size = size.tiny)
+if showLifecycleInvalidation and gInvalidationEvent and gEventDir < 0
+    label.new(bar_index, gLastExitPrice, "INV " + str.tostring(gLastExitPrice, format.mintick) + " " + f_signedPct(gLastResultPct), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = gInvalidMarkColor, textcolor = color.white, size = size.tiny)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║  9. OPTIONAL CANDLE INTELLIGENCE                                       ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_CANDLES = "06 • Candle Intelligence"
+
+bool colorBars = input.bool(true, "Color candles by Fusion Score", group = GRP_CANDLES)
+string candleSource = input.string("Confluence", "Candle Source", options = ["ACW", "TDI", "Confluence"], group = GRP_CANDLES)
+int barTransparency = input.int(18, "Candle transparency", minval = 0, maxval = 90, group = GRP_CANDLES)
+bool candleNeedsTdi = candleSource == "TDI" or candleSource == "Confluence"
+float tdiDirectionalScore = tdiTrendState > 0 ? math.max(math.abs(tdiTrendCarrier), 15.0) : tdiTrendState < 0 ? -math.max(math.abs(tdiTrendCarrier), 15.0) : 0.0
+float candleScore = fusionScore
+if candleSource == "TDI" and tdiActive
+    candleScore := tdiDirectionalScore
+else if candleSource == "Confluence" and tdiActive
+    candleScore := sameDirection ? acwDir * math.abs(confluenceScore) : confluenceScore
+
+bool candleFallback = candleNeedsTdi and not tdiActive
+bool momentumCooling = momentumState == "COOLING" or momentumState == "PULLBACK"
+int momentumFade = momentumCooling ? 12 : momentumState == "COUNTER" ? 20 : 0
+int candleAlphaBase = math.abs(candleScore) >= 55.0 ? math.max(barTransparency, 12) : math.abs(candleScore) < 18.0 ? 58 : math.max(barTransparency + 10, 22)
+int candleAlpha = int(f_clamp(candleAlphaBase + momentumFade, 0.0, 90.0))
+color fusionBarColor = math.abs(candleScore) < 18.0 ? color.new(neutralBase, 58) : directionConflict and tdiActive ? color.new(#B388FF, 28) : f_scoreColor(candleScore, candleAlpha)
+barcolor(colorBars ? fusionBarColor : na)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║ 10. DASHBOARD                                                          ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+const string GRP_DASH = "07 • Dashboard"
+
+string hudLayout = input.string("Descriptive", "HUD Layout", options = ["Descriptive", "Compact", "Diagnostic"], group = GRP_DASH)
+string dashSizeInput = input.string("Tiny", "Dashboard size", options = ["Tiny", "Small", "Normal"], group = GRP_DASH)
+int dashTransparency = input.int(60, "HUD transparency", minval = 25, maxval = 95, group = GRP_DASH)
+
+dashTextSize = dashSizeInput == "Tiny" ? size.tiny : dashSizeInput == "Normal" ? size.normal : size.small
+
+var table dash = table.new(
+    position.top_right,
+    2,
+    12,
+    bgcolor = color.new(darkBase, dashTransparency),
+    frame_color = color.new(neutralBase, 58),
+    frame_width = 1,
+    border_color = color.new(neutralBase, 82),
+    border_width = 1)
+
+if barstate.isfirst
+    dash.merge_cells(0, 0, 1, 0)
+
+f_dashCell(table tbl, int column, int row, string txt, color txtColor, color bgColor, string halign) =>
+    tbl.cell(
+        column,
+        row,
+        txt,
+        text_color = txtColor,
+        bgcolor = bgColor,
+        text_size = dashTextSize,
+        text_halign = halign == "left" ? text.align_left : text.align_right)
+
+if showDashboard and barstate.islast
+    dash.clear(0, 0, 1, 11)
+    color acwColor = f_scoreColor(fusionScore, 0)
+    color tdiColor = f_scoreColor(tdiTrendCarrier, 0)
+    color momentumColor = f_scoreColor(tdiMomentum, 0)
+    color maCoreColor = maCoreDir == 0 ? neutralBase : f_scoreColor(maCoreDir * maSepStrength, 0)
+    color contextColor = f_scoreColor((tdiNearScore + tdiAnchorScore) * 0.50, 0)
+    color qualityColor = fActionDir == 0 ? neutralBase : f_scoreColor(fActionDir * fQuality, 0)
+    color riskColor = fRiskText == "NONE" ? neutralBase : #FFAB40
+    color actionColor = fActionDir > 0 ? bullHot : fActionDir < 0 ? bearHot : neutralBase
+    string structureName = swingState.trendDir == 1 ? "HH / HL ↑" : swingState.trendDir == -1 ? "LH / LL ↓" : "MIXED"
+    string structureLong = structureName + " • " + structureFreshness
+    string structureShort = structureName + " • " + (structureFreshness == "FRESH" ? "F" : structureFreshness == "MATURE" ? "M" : "A")
+    string maPhaseShort = maCorePhase == "EXPAND" ? "EXP" : maCorePhase == "CONTRACT" ? "CTR" : maCorePhase == "COMPRESS" ? "CMP" : maCorePhase == "FLIP" ? "FLIP" : "HOLD"
+    string maDirShort = maCoreDir > 0 ? "BULL" : maCoreDir < 0 ? "BEAR" : "MIX"
+    string maCompact = maDirShort + " • " + maPhaseShort
+    string linkText = tdiActive ? "LINKED" : tdiIntegration == "Off" ? "OFF" : tdiLinkStatus
+    string trendText = tdiActive ? (tdiTrendState > 0 ? "BULL " + str.tostring(tdiTrendCarrier, "#.0") : tdiTrendState < 0 ? "BEAR " + str.tostring(tdiTrendCarrier, "#.0") : "MIX " + str.tostring(tdiTrendCarrier, "#.0")) : "UNLINKED"
+    string flowText = not tdiActive or not tdiFlowAvailable ? "N/A" : tdiTrendState == 0 ? "FLOW " + str.tostring(tdiFlow, "#.0") + " • UNPAIRED" : math.abs(tdiFlow) >= 15.0 and tdiFlow * tdiTrendState > 0.0 ? "CONF " + str.tostring(tdiFlow, "#.0") : math.abs(tdiFlow) >= 15.0 and tdiFlow * tdiTrendState < 0.0 ? "OPP " + str.tostring(tdiFlow, "#.0") : "NEUT " + str.tostring(tdiFlow, "#.0")
+    string trendPlain = tdiActive ? (tdiTrendState > 0 ? "UPTREND " + str.tostring(tdiTrendCarrier, "#.0") : tdiTrendState < 0 ? "DOWNTREND " + str.tostring(tdiTrendCarrier, "#.0") : "MIXED TREND " + str.tostring(tdiTrendCarrier, "#.0")) : "UNLINKED"
+    string momentumPlain = "MOMENTUM " + momentumState + " " + str.tostring(tdiMomentum, "#.0")
+    string flowMagnitude = str.tostring(math.abs(tdiFlow), "#.0")
+    string flowPlain = not tdiActive or not tdiFlowAvailable ? "FLOW N/A" : tdiTrendState == 0 ? "FLOW UNPAIRED " + flowMagnitude : math.abs(tdiFlow) >= 15.0 and tdiFlow * tdiTrendState > 0.0 ? (tdiTrendState > 0 ? "BULL FLOW SUPPORTS " : "BEAR FLOW SUPPORTS ") + flowMagnitude : math.abs(tdiFlow) >= 15.0 and tdiFlow * tdiTrendState < 0.0 ? "FLOW OPPOSES " + flowMagnitude : "FLOW NEUTRAL " + flowMagnitude
+    string tdiLong = tdiActive ? trendPlain + " • " + momentumPlain : "TDI " + linkText
+    string tdiCompact = tdiActive ? trendText + " • " + momentumState : "TDI " + linkText
+    string qualityLong = str.tostring(fQuality, "#.0") + " • " + flowPlain
+    string actionHudText = gReadiness == "WAIT" ? fActionText : gReadiness + " • " + fActionText
+    string actionPlainCore = fActionText
+    if fReadiness != "WAIT" and fActionDir != 0
+        if fArchetype == "CONT"
+            actionPlainCore := fActionDir > 0 ? "LONG CONTINUATION • " + fScope : "SHORT CONTINUATION • " + fScope
+        else if fArchetype == "IMPULSE"
+            actionPlainCore := fActionDir > 0 ? "LONG IMPULSE • " + fScope : "SHORT IMPULSE • " + fScope
+        else if fArchetype == "COUNTERTREND"
+            actionPlainCore := fActionDir > 0 ? "LONG COUNTERTREND • " + fScope : "SHORT COUNTERTREND • " + fScope
+        else if fArchetype == "RECOVERY"
+            actionPlainCore := "RECOVERY " + (fActionDir > 0 ? "UP" : "DOWN")
+        else if fArchetype == "PULLBACK"
+            actionPlainCore := "PULLBACK " + (fActionDir > 0 ? "UP" : "DOWN")
+    else
+        if fActionText == "WAIT • TIMING"
+            actionPlainCore := "WAIT • MOMENTUM NOT READY"
+        else if fActionText == "WAIT • CHOP"
+            actionPlainCore := "WAIT • CHOP / NO EDGE"
+        else if fActionText == "WAIT • CONTEXT"
+            actionPlainCore := "WAIT • CONTEXT NOT READY"
+        else if fActionText == "WAIT • COUNTER"
+            actionPlainCore := "WAIT • MOMENTUM OPPOSES"
+        else if fActionText == "WAIT • CONFLICT"
+            actionPlainCore := "WAIT • DIRECTION CONFLICT"
+        else if fActionText == "WAIT • EXHAUST"
+            actionPlainCore := "WAIT • TREND EXHAUSTED"
+        else if fActionText == "WAIT • SQUEEZE"
+            actionPlainCore := "WAIT • MARKET COMPRESSED"
+    string actionHudDescriptive = gReadiness == "WAIT" ? actionPlainCore : gReadiness + " • " + actionPlainCore
+    string gTradeStateText = "IDLE"
+    if gInvalidationEvent
+        gTradeStateText := "INVALIDATED • " + gEventReason
+    else if gExitEvent
+        gTradeStateText := "EXIT • " + gEventReason
+    else if gLifecycleState == "CAUTION"
+        gTradeStateText := "CAUTION • " + gLifecycleReason
+    else if gLifecycleState == "ACTIVE" and gLifecycleDir > 0
+        gTradeStateText := showSignalAge and not na(gSignalAge) ? "LONG ACTIVE • " + str.tostring(gSignalAge) + " bars" : "LONG ACTIVE"
+    else if gLifecycleState == "ACTIVE" and gLifecycleDir < 0
+        gTradeStateText := showSignalAge and not na(gSignalAge) ? "SHORT ACTIVE • " + str.tostring(gSignalAge) + " bars" : "SHORT ACTIVE"
+    string gEntryAgeText = (gLifecycleState == "ACTIVE" or gLifecycleState == "CAUTION") and gLifecycleDir != 0 and not na(gSignalAge) and not na(gEntryPrice) ? (gLifecycleDir > 0 ? "A↑ @" : "A↓ @") + str.tostring(gEntryPrice, format.mintick) + (showSignalAge ? " • " + str.tostring(gSignalAge) + " bars ago" : " • ACTIVE") : "NONE"
+    string gLastTradeText = not na(gLastExitPrice) and not na(gLastEntryPrice) ? gLastTerminalType + " @" + str.tostring(gLastExitPrice, format.mintick) + " • " + f_signedPct(gLastResultPct) + (not na(gLastTradeBars) ? " • " + str.tostring(gLastTradeBars) + "b" : "") : "NONE"
+    string gCautionToken = gLifecycleReason == "TREND TIRED" ? "TIRED" : gLifecycleReason == "DIVERGENCE FRESH" ? "DIV" : gLifecycleReason == "FLOW OPPOSES" ? "FLOW" : gLifecycleReason == "ANCHOR OPPOSES" ? "ANCHOR" : gLifecycleReason == "MOMENTUM COOLING" ? "COOL" : "RISK"
+    string gCompactLifecycleText = gInvalidationEvent ? "INV " + f_signedPct(gLastResultPct) : gExitEvent ? "X " + f_signedPct(gLastResultPct) : gLifecycleState == "CAUTION" and gLifecycleDir > 0 ? "L ! " + gCautionToken : gLifecycleState == "CAUTION" and gLifecycleDir < 0 ? "S ! " + gCautionToken : gLifecycleState == "ACTIVE" and gLifecycleDir > 0 ? "L @" + str.tostring(gEntryPrice, format.mintick) + (showSignalAge and not na(gSignalAge) ? " +" + str.tostring(gSignalAge) + "b" : "") : gLifecycleState == "ACTIVE" and gLifecycleDir < 0 ? "S @" + str.tostring(gEntryPrice, format.mintick) + (showSignalAge and not na(gSignalAge) ? " +" + str.tostring(gSignalAge) + "b" : "") : "IDLE"
+    string contextHudText = tdiVersionMismatch ? "TDI LINK • VERSION MISMATCH" : fContextText
+    string contextHudCompact = tdiVersionMismatch ? "TDI VERSION MISMATCH" : fContextCompact
+    bool anyFallback = renderSourceFallback or candleFallback
+    string headerText = "ACW ∞ 1g1 • " + signalPersonality + " • " + hudLayout
+    if tdiVersionMismatch
+        headerText := "ACW ∞ 1g1 • TDI VERSION MISMATCH"
+    else if anyFallback
+        headerText += " • FALLBACK"
+    color headerColor = tdiVersionMismatch ? #FF9100 : tdiActive ? f_scoreColor(confluenceScore, 0) : acwColor
+    dash.cell(0, 0, headerText, text_color = color.white, bgcolor = color.new(headerColor, 38), text_size = dashTextSize, text_halign = text.align_center)
+
+    if hudLayout == "Descriptive"
+        f_dashCell(dash, 0, 1, "PROFILE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 1, profileName, color.white, color.new(darkBase, dashTransparency), "right")
+        f_dashCell(dash, 0, 2, "STRUCTURE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 2, structureLong, color.white, color.new(swingState.trendDir > 0 ? structureBull : swingState.trendDir < 0 ? structureBear : neutralBase, 66), "right")
+        f_dashCell(dash, 0, 3, "MA CORE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 3, maCoreState, color.white, color.new(maCoreColor, 58), "right")
+        f_dashCell(dash, 0, 4, "CONTEXT", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 4, contextHudText, color.white, color.new(tdiVersionMismatch ? #FF9100 : contextColor, 58), "right")
+        f_dashCell(dash, 0, 5, "TDI", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 5, tdiLong, color.white, color.new(tdiColor, 62), "right")
+        f_dashCell(dash, 0, 6, "QUALITY", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 6, qualityLong, color.white, color.new(qualityColor, 62), "right")
+        f_dashCell(dash, 0, 7, "RISK", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 7, fRiskText, color.white, color.new(riskColor, fRiskText == "NONE" ? 80 : 52), "right")
+        f_dashCell(dash, 0, 8, "ACTION", color.white, color.new(darkBase, 38), "left")
+        f_dashCell(dash, 1, 8, actionHudDescriptive, color.white, color.new(actionColor, 42), "right")
+        f_dashCell(dash, 0, 9, "TRADE STATE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 9, gTradeStateText, color.white, color.new(gLifecycleState == "IDLE" ? neutralBase : actionColor, 58), "right")
+        f_dashCell(dash, 0, 10, "ENTRY EVENT", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 10, gEntryAgeText, color.white, color.new(gLifecycleState == "IDLE" ? neutralBase : actionColor, 66), "right")
+        f_dashCell(dash, 0, 11, "LAST TRADE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 11, gLastTradeText, color.white, color.new(na(gLastResultPct) ? neutralBase : gLastResultPct >= 0.0 ? gLongMarkColor : gShortMarkColor, 62), "right")
+    else if hudLayout == "Compact"
+        f_dashCell(dash, 0, 1, "STR", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 1, structureShort, color.white, color.new(swingState.trendDir > 0 ? structureBull : swingState.trendDir < 0 ? structureBear : neutralBase, 68), "right")
+        f_dashCell(dash, 0, 2, "MA", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 2, maCompact, color.white, color.new(maCoreColor, 62), "right")
+        f_dashCell(dash, 0, 3, "CTX", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 3, contextHudCompact, color.white, color.new(tdiVersionMismatch ? #FF9100 : contextColor, 62), "right")
+        f_dashCell(dash, 0, 4, "TDI", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 4, tdiCompact, color.white, color.new(momentumColor, 66), "right")
+        f_dashCell(dash, 0, 5, "QLTY", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 5, str.tostring(fQuality, "#.0") + " • " + flowText, color.white, color.new(qualityColor, 64), "right")
+        f_dashCell(dash, 0, 6, "RISK", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 6, fRiskText, color.white, color.new(riskColor, fRiskText == "NONE" ? 82 : 54), "right")
+        f_dashCell(dash, 0, 7, "ACT", color.white, color.new(darkBase, 38), "left")
+        f_dashCell(dash, 1, 7, actionHudText, color.white, color.new(actionColor, 44), "right")
+        f_dashCell(dash, 0, 8, "STATE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 8, gCompactLifecycleText, color.white, color.new(gLifecycleState == "IDLE" ? neutralBase : actionColor, 60), "right")
+    else
+        f_dashCell(dash, 0, 1, "ACW", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 1, str.tostring(fusionScore, "#.0") + " • " + regime, color.white, color.new(acwColor, 62), "right")
+        f_dashCell(dash, 0, 2, "MAMA", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 2, str.tostring(mamaScore, "#.0"), color.white, color.new(mamaColor, 68), "right")
+        f_dashCell(dash, 0, 3, "MACD", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 3, str.tostring(macdScore, "#.0"), color.white, color.new(macdColor, 68), "right")
+        f_dashCell(dash, 0, 4, "STR AGE", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 4, structureName + " • " + str.tostring(structureAgeBars) + " • " + structureRelation, color.white, color.new(neutralBase, 70), "right")
+        f_dashCell(dash, 0, 5, "MA SEP", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 5, str.tostring(maSepStrength, "#.0") + " / Δ " + str.tostring(maSepDelta3, "#.0"), color.white, color.new(maCoreColor, 68), "right")
+        f_dashCell(dash, 0, 6, "TDI", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 6, trendText + " • M " + str.tostring(tdiMomentum, "#.0") + " • F " + flowText, color.white, color.new(tdiColor, 68), "right")
+        f_dashCell(dash, 0, 7, "CTX RAW", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 7, "N " + str.tostring(tdiNearScore, "#.0") + " • A " + str.tostring(tdiAnchorScore, "#.0"), color.white, color.new(contextColor, 68), "right")
+        f_dashCell(dash, 0, 8, "QUALITY", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 8, str.tostring(fQuality, "#.0") + " • PEN " + str.tostring(fSoftPenalty, "#.0"), color.white, color.new(qualityColor, 68), "right")
+        f_dashCell(dash, 0, 9, "RISK", color.new(color.white, 28), color.new(darkBase, dashTransparency), "left")
+        f_dashCell(dash, 1, 9, fRiskText, color.white, color.new(riskColor, fRiskText == "NONE" ? 82 : 58), "right")
+        f_dashCell(dash, 0, 10, "ACTION", color.white, color.new(darkBase, 38), "left")
+        f_dashCell(dash, 1, 10, actionHudText + " • " + linkText, color.white, color.new(actionColor, 46), "right")
+else if not showDashboard
+    dash.clear(0, 0, 1, 11)
+
+// ╔═════════════════════════════════════════════════════════════════════════╗
+// ║ 11. ALERTS                                                             ║
+// ╚═════════════════════════════════════════════════════════════════════════╝
+
+alertcondition(gEntryLongEvent, title = "ACW ∞ Agreement Long", message = "ACW G lifecycle: A↑ long agreement started.")
+alertcondition(gEntryShortEvent, title = "ACW ∞ Agreement Short", message = "ACW G lifecycle: A↓ short agreement started.")
+alertcondition(gCautionEvent, title = "ACW ∞ Lifecycle Caution", message = "ACW G lifecycle: caution state started.")
+alertcondition(gExitEvent, title = "ACW ∞ Lifecycle Exit", message = "ACW G lifecycle: active edge deteriorated; X event.")
+alertcondition(gInvalidationEvent, title = "ACW ∞ Lifecycle Invalidation", message = "ACW G lifecycle: original directional thesis invalidated.")
+
+alertcondition(bullImpulse, title = "ACW ∞ Bull Fusion Impulse", message = "ACW Spectral Fusion: Bull impulse detected.")
+alertcondition(bearImpulse, title = "ACW ∞ Bear Fusion Impulse", message = "ACW Spectral Fusion: Bear impulse detected.")
+alertcondition(syncBullImpulse, title = "ACW ∞ Synchronized Bull Impulse", message = "ACW Spectral Fusion: synchronized bull impulse detected.")
+alertcondition(syncBearImpulse, title = "ACW ∞ Synchronized Bear Impulse", message = "ACW Spectral Fusion: synchronized bear impulse detected.")
+alertcondition(compressionReleaseBull, title = "ACW ∞ Bull Compression Release", message = "ACW Spectral Fusion: Bullish compression release.")
+alertcondition(compressionReleaseBear, title = "ACW ∞ Bear Compression Release", message = "ACW Spectral Fusion: Bearish compression release.")
+alertcondition(mamaCrossUp, title = "ACW ∞ MAMA/FAMA Bull Cross", message = "ACW Spectral Fusion: MAMA crossed above FAMA.")
+alertcondition(mamaCrossDown, title = "ACW ∞ MAMA/FAMA Bear Cross", message = "ACW Spectral Fusion: MAMA crossed below FAMA.")
