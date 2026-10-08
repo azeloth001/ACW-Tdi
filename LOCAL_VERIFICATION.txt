@@ -1,0 +1,26 @@
+test_anchor_break_requires_price_and_ma_agreement (test_turning_pressure.TurnPressure.test_anchor_break_requires_price_and_ma_agreement) ... ok
+test_compression_does_not_equal_turn (test_turning_pressure.TurnPressure.test_compression_does_not_equal_turn) ... ok
+test_exact_recovery_boundaries (test_turning_pressure.TurnPressure.test_exact_recovery_boundaries) ... ok
+test_linked_risk_semantics_match_original_early_path (test_turning_pressure.TurnPressure.test_linked_risk_semantics_match_original_early_path) ... ok
+test_price_context_and_maturity_are_authoritative (test_turning_pressure.TurnPressure.test_price_context_and_maturity_are_authoritative) ... ok
+test_raw_extreme_or_one_fast_twitch_is_insufficient (test_turning_pressure.TurnPressure.test_raw_extreme_or_one_fast_twitch_is_insufficient) ... ok
+test_rearm_distinguishes_new_leg_from_same_area_expiry (test_turning_pressure.TurnPressure.test_rearm_distinguishes_new_leg_from_same_area_expiry) ... ok
+test_release_can_support_turn_after_acceleration_peak (test_turning_pressure.TurnPressure.test_release_can_support_turn_after_acceleration_peak) ... ok
+test_small_or_already_extended_momentum_rejected (test_turning_pressure.TurnPressure.test_small_or_already_extended_momentum_rejected) ... ok
+test_turns_are_mirrored_and_detected_before_residual_cross (test_turning_pressure.TurnPressure.test_turns_are_mirrored_and_detected_before_residual_cross) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.010s
+
+OK
+
+Bridge decoder: byte-identical
+Original G2 geometry/thresholds: byte-identical
+Late guard and confirmed lifecycle: byte-identical
+Alert registrations: byte-identical
+request.security(: 0 (unchanged)
+plot(: 9 (unchanged)
+plotshape(: 10 (unchanged)
+alertcondition(: 13 (unchanged)
+TDI hash: matches supplied frozen hash
+Delimiter sanity: PASS; TradingView compilation NOT performed
